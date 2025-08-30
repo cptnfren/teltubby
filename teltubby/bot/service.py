@@ -45,7 +45,9 @@ class TeltubbyBotService:
         self._app: Optional[Application] = None
         self._s3: Optional[S3Client] = None
         self._dedup: Optional[DedupIndex] = None
-        self._albums = AlbumAggregator(window_seconds=config.album_aggregation_window_seconds)
+        self._albums = AlbumAggregator(
+            window_seconds=config.album_aggregation_window_seconds
+        )
         self._quota: Optional[QuotaManager] = None
         self._finalizer_task: Optional[asyncio.Task] = None
 
@@ -131,7 +133,10 @@ class TeltubbyBotService:
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
-                    logger.warning("Failed to send typing indicator", extra={"error": str(e)})
+                    logger.warning(
+                        "Failed to send typing indicator", 
+                        extra={"error": str(e)}
+                    )
         
         return TypingContext(self._app.bot if self._app else None, chat_id)
 
@@ -182,19 +187,28 @@ class TeltubbyBotService:
                         # Get last message for typing context and telemetry
                         last_msg = items[-1]
                         
-                        logger.info(f"Finalizer starting batch processing for {len(items)} items")
+                        logger.info(
+                            f"Finalizer starting batch processing for {len(items)} items"
+                        )
                         
                         # Show typing indicator while processing in finalizer
                         async with self._typing_context(last_msg.chat_id):
-                            res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
+                            res = await process_batch(
+                                self._config, self._s3, self._dedup, self._app.bot, items
+                            )
                         
                         logger.info(
                             "Finalizer processed batch successfully",
-                            extra={"message_ids": [m.message_id for m in items], "count": len(items)},
+                            extra={
+                                "message_ids": [m.message_id for m in items], 
+                                "count": len(items)
+                            },
                         )
 
                         # Check if the entire batch failed (all items skipped or failed)
-                        successful_items = [o for o in res.outcomes if o.s3_key and not o.skipped_reason]
+                        successful_items = [
+                            o for o in res.outcomes if o.s3_key and not o.skipped_reason
+                        ]
                         failed_items = [o for o in res.outcomes if o.skipped_reason]
                         
                         if not successful_items and failed_items:
@@ -204,19 +218,37 @@ class TeltubbyBotService:
                             for outcome in failed_items:
                                 if outcome.skipped_reason:
                                     if outcome.skipped_reason == "exceeds_bot_limit":
-                                        size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
-                                        failure_reasons.append(f"File {outcome.ordinal}: exceeds 50MB limit ({size_str})")
+                                        size_str = (
+                                            f"{outcome.size_bytes or 'unknown'} bytes" 
+                                            if outcome.size_bytes else "unknown size"
+                                        )
+                                        failure_reasons.append(
+                                            f"File {outcome.ordinal}: exceeds 50MB limit ({size_str})"
+                                        )
                                     elif outcome.skipped_reason == "exceeds_cfg_limit":
-                                        size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
-                                        failure_reasons.append(f"File {outcome.ordinal}: exceeds configured limit ({size_str})")
+                                        size_str = (
+                                            f"{outcome.size_bytes or 'unknown'} bytes" 
+                                            if outcome.size_bytes else "unknown size"
+                                        )
+                                        failure_reasons.append(
+                                            f"File {outcome.ordinal}: exceeds configured limit ({size_str})"
+                                        )
                                     elif outcome.skipped_reason == "download_failed":
-                                        failure_reasons.append(f"File {outcome.ordinal}: download failed")
+                                        failure_reasons.append(
+                                            f"File {outcome.ordinal}: download failed"
+                                        )
                                     elif outcome.skipped_reason == "album_validation_failed":
-                                        failure_reasons.append(f"File {outcome.ordinal}: validation failed")
+                                        failure_reasons.append(
+                                            f"File {outcome.ordinal}: validation failed"
+                                        )
                                     elif outcome.skipped_reason == "no_media":
-                                        failure_reasons.append(f"File {outcome.ordinal}: no media content")
+                                        failure_reasons.append(
+                                            f"File {outcome.ordinal}: no media content"
+                                        )
                                     else:
-                                        failure_reasons.append(f"File {outcome.ordinal}: {outcome.skipped_reason}")
+                                        failure_reasons.append(
+                                            f"File {outcome.ordinal}: {outcome.skipped_reason}"
+                                        )
                             
                             # Combine all failure reasons
                             if len(failure_reasons) > 1:
@@ -236,7 +268,9 @@ class TeltubbyBotService:
                         else:
                             # Some or all items succeeded - send success telemetry
                             try:
-                                dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
+                                dedup_ordinals = [
+                                    o.ordinal for o in res.outcomes if o.is_duplicate
+                                ]
                                 media_types = list({o.type for o in res.outcomes if o.s3_key})
                                 skipped = [o for o in res.outcomes if o.skipped_reason]
                                 
@@ -287,13 +321,17 @@ class TeltubbyBotService:
             logger.info("album finalizer loop stopped")
 
     async def _cmd_start(self, update: Update, context: CallbackContext) -> None:
-        if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
             return
         text = TelemetryFormatter.format_start()
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     async def _cmd_status(self, update: Update, context: CallbackContext) -> None:
-        if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
             return
         
         # Show typing indicator while checking status
@@ -304,7 +342,9 @@ class TeltubbyBotService:
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     async def _cmd_quota(self, update: Update, context: CallbackContext) -> None:
-        if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
             return
         if not self._quota:
             return
@@ -314,19 +354,25 @@ class TeltubbyBotService:
         
         used_ratio = self._quota.used_ratio()
         if used_ratio is None:
-            await update.effective_message.reply_text("Quota unknown (no bucket quota configured).")
+            await update.effective_message.reply_text(
+                "Quota unknown (no bucket quota configured)."
+            )
             return
         text = TelemetryFormatter.format_quota(used_ratio)
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     async def _cmd_mode(self, update: Update, context: CallbackContext) -> None:
-        if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
             return
         text = TelemetryFormatter.format_mode(self._config.telegram_mode)
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     async def _cmd_db_maint(self, update: Update, context: CallbackContext) -> None:
-        if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
             return
         if self._dedup:
             self._dedup.vacuum()
@@ -338,17 +384,28 @@ class TeltubbyBotService:
         logger.info("Message received", extra={
             "chat_type": update.effective_chat.type if update.effective_chat else "None",
             "user_id": update.effective_user.id if update.effective_user else "None",
-            "message_id": (update.effective_message.message_id 
-                          if update.effective_message else "None"),
-            "has_media": bool(update.effective_message and 
-                             update.effective_message.media_group_id)
+            "message_id": (
+                update.effective_message.message_id 
+                if update.effective_message else "None"
+            ),
+            "has_media": bool(
+                update.effective_message and 
+                update.effective_message.media_group_id
+            )
         })
         
         if not (update.effective_chat and update.effective_chat.type == "private"):
             logger.info("Ignoring non-DM message")
             return
-        if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
-            logger.info("Ignoring non-whitelisted user", extra={"user_id": update.effective_user.id if update.effective_user else "None"})
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            logger.info(
+                "Ignoring non-whitelisted user", 
+                extra={
+                    "user_id": update.effective_user.id if update.effective_user else "None"
+                }
+            )
             return
         if not (self._s3 and self._dedup and self._app):
             logger.warning("Services not initialized")
@@ -393,12 +450,16 @@ class TeltubbyBotService:
                 logger.info(f"Starting batch processing for {len(items)} items")
                 
                 # Process batch
-                res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
+                res = await process_batch(
+                    self._config, self._s3, self._dedup, self._app.bot, items
+                )
                 
                 logger.info(f"Batch processing completed successfully")
                 
                 # Check if the entire batch failed (all items skipped or failed)
-                successful_items = [o for o in res.outcomes if o.s3_key and not o.skipped_reason]
+                successful_items = [
+                    o for o in res.outcomes if o.s3_key and not o.skipped_reason
+                ]
                 failed_items = [o for o in res.outcomes if o.skipped_reason]
                 
                 if not successful_items and failed_items:
@@ -408,19 +469,37 @@ class TeltubbyBotService:
                     for outcome in failed_items:
                         if outcome.skipped_reason:
                             if outcome.skipped_reason == "exceeds_bot_limit":
-                                size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
-                                failure_reasons.append(f"File {outcome.ordinal}: exceeds 50MB limit ({size_str})")
+                                size_str = (
+                                    f"{outcome.size_bytes or 'unknown'} bytes" 
+                                    if outcome.size_bytes else "unknown size"
+                                )
+                                failure_reasons.append(
+                                    f"File {outcome.ordinal}: exceeds 50MB limit ({size_str})"
+                                )
                             elif outcome.skipped_reason == "exceeds_cfg_limit":
-                                size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
-                                failure_reasons.append(f"File {outcome.ordinal}: exceeds configured limit ({size_str})")
+                                size_str = (
+                                    f"{outcome.size_bytes or 'unknown'} bytes" 
+                                    if outcome.size_bytes else "unknown size"
+                                )
+                                failure_reasons.append(
+                                    f"File {outcome.ordinal}: exceeds configured limit ({size_str})"
+                                )
                             elif outcome.skipped_reason == "download_failed":
-                                failure_reasons.append(f"File {outcome.ordinal}: download failed")
+                                failure_reasons.append(
+                                    f"File {outcome.ordinal}: download failed"
+                                )
                             elif outcome.skipped_reason == "album_validation_failed":
-                                failure_reasons.append(f"File {outcome.ordinal}: validation failed")
+                                failure_reasons.append(
+                                    f"File {outcome.ordinal}: validation failed"
+                                )
                             elif outcome.skipped_reason == "no_media":
-                                failure_reasons.append(f"File {outcome.ordinal}: no media content")
+                                failure_reasons.append(
+                                    f"File {outcome.ordinal}: no media content"
+                                )
                             else:
-                                failure_reasons.append(f"File {outcome.ordinal}: {outcome.skipped_reason}")
+                                failure_reasons.append(
+                                    f"File {outcome.ordinal}: {outcome.skipped_reason}"
+                                )
                     
                     # Combine all failure reasons
                     if len(failure_reasons) > 1:
@@ -435,7 +514,9 @@ class TeltubbyBotService:
                     await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
                 else:
                     # Some or all items succeeded - send success telemetry
-                    dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
+                    dedup_ordinals = [
+                        o.ordinal for o in res.outcomes if o.is_duplicate
+                    ]
                     media_types = list({o.type for o in res.outcomes if o.s3_key})
                     skipped = [o for o in res.outcomes if o.skipped_reason]
                     
@@ -451,7 +532,9 @@ class TeltubbyBotService:
                     ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
                     await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
             except Exception as e:
-                logger.exception(f"ingestion failed for message {message.message_id}: {str(e)}")
+                logger.exception(
+                    f"ingestion failed for message {message.message_id}: {str(e)}"
+                )
                 # Extract factual error details
                 error_str = str(e)
                 if "File is too big" in error_str:
