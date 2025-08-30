@@ -206,13 +206,19 @@ class TelemetryFormatter:
             else f"{cls.EMOJIS['success']} **Jobs Queued** {cls.EMOJIS['queue']}"
         )
         lines = [header, ""]
+        
         for jid in job_ids:
-            lines.append(f"• `{jid}`")
-            lines.append(
-                f"  {cls.EMOJIS['inspect']} /jobs {jid}  "
-                f"{cls.EMOJIS['retry']} /retry {jid}  "
-                f"{cls.EMOJIS['cancel']} /cancel {jid}"
-            )
+            lines.append(f"• **Job ID:** `{jid}`")
+            lines.append("")
+            lines.append("**Available Commands:**")
+            lines.append(f"🔎 **Inspect:** `/jobs {jid}`")
+            lines.append(f"🔁 **Retry:** `/retry {jid}`")
+            lines.append(f"🛑 **Cancel:** `/cancel {jid}`")
+            lines.append("")
+        
+        # Add helpful tip for mobile users
+        lines.append(f"{cls.EMOJIS['info']} **Mobile Tip:** Tap any command above to copy it!")
+        
         return "\n".join(lines)
     
     @classmethod
