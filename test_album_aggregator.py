@@ -131,3 +131,4 @@ async def test_album_aggregator():
 
 if __name__ == "__main__":
     asyncio.run(test_album_aggregator())
+

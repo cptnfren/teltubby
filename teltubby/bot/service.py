@@ -23,7 +23,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram import ChatAction
+# ChatAction is already imported from telegram.constants above
 from ..runtime.config import AppConfig
 from ..storage.s3_client import S3Client
 from ..db.dedup import DedupIndex
