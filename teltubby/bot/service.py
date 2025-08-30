@@ -71,6 +71,8 @@ class TeltubbyBotService:
         # MTProto interactive auth
         self._app.add_handler(CommandHandler("mtcode", self._cmd_mtcode))
         self._app.add_handler(CommandHandler("mtpass", self._cmd_mtpass))
+        # MTProto worker monitoring
+        self._app.add_handler(CommandHandler("mtstatus", self._cmd_mtstatus))
         # Queue/Job management commands (admin-only: enforced by whitelist)
         self._app.add_handler(CommandHandler("queue", self._cmd_queue))
         self._app.add_handler(CommandHandler("jobs", self._cmd_jobs))
@@ -396,6 +398,108 @@ class TeltubbyBotService:
         now_iso = __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
         self._dedup.set_secret("mt_password", pwd, now_iso)
         await update.effective_message.reply_text("MTProto password stored.")
+
+    async def _cmd_mtstatus(self, update: Update, context: CallbackContext) -> None:
+        """Handle /mtstatus command for MTProto worker status."""
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+
+        try:
+            # Get worker status from Docker
+            import subprocess
+            
+            # Check if worker container is running
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "name=mtworker", "--format", "{{.Status}}"],
+                capture_output=True, text=True, timeout=10
+            )
+            
+            if result.returncode != 0:
+                await update.effective_message.reply_text(
+                    "❌ **Failed to query worker status.**\n\n"
+                    "Docker command failed. Check if Docker is running.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            container_status = result.stdout.strip()
+            if not container_status:
+                await update.effective_message.reply_text(
+                    "⚠️ **Worker Status: Stopped**\n\n"
+                    "The MTProto worker container is not running.\n"
+                    "Large files will not be processed.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            # Get recent worker logs for detailed status
+            log_result = subprocess.run(
+                ["docker", "logs", "mtworker", "--tail", "10"],
+                capture_output=True, text=True, timeout=10
+            )
+            
+            logs = log_result.stdout if log_result.returncode == 0 else ""
+            
+            # Parse status indicators
+            status_indicators = []
+            if "MTProto client started" in logs:
+                status_indicators.append("✅ Authenticated with Telegram")
+            if "worker started" in logs:
+                status_indicators.append("✅ Worker running and consuming jobs")
+            if "MTProto session monitoring started" in logs:
+                status_indicators.append("✅ Session health monitoring active")
+            if "simulate mode enabled" in logs:
+                status_indicators.append("⚠️ Running in simulate mode")
+            if "MTProto credentials not configured" in logs:
+                status_indicators.append("❌ MTProto credentials missing")
+            
+            # Determine overall status
+            if "simulate mode enabled" in logs:
+                overall_status = "⚠️ **Simulate Mode**"
+                status_desc = "Worker is running but not processing large files"
+            elif "MTProto client started" in logs and "worker started" in logs:
+                overall_status = "✅ **Healthy**"
+                status_desc = "Worker is fully operational"
+            elif "MTProto client started" in logs:
+                overall_status = "🔄 **Authenticating**"
+                status_desc = "Worker is starting up"
+            else:
+                overall_status = "❌ **Error**"
+                status_desc = "Worker has encountered an error"
+            
+            # Format response
+            response = f"{overall_status}\n\n{status_desc}\n\n"
+            response += "**Container Status:** " + container_status + "\n\n"
+            
+            if status_indicators:
+                response += "**Status Indicators:**\n"
+                for indicator in status_indicators:
+                    response += f"• {indicator}\n"
+                response += "\n"
+            
+            # Add recent activity if available
+            import re
+            timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', logs)
+            if timestamp_match:
+                response += f"**Last Activity:** {timestamp_match.group(1)}\n\n"
+            
+            response += "**Commands:**\n"
+            response += "• `/mtcode <code>` - Submit verification code\n"
+            response += "• `/mtpass <password>` - Submit 2FA password\n"
+            response += "• `/mtstatus` - Check this status again"
+            
+            await update.effective_message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.exception("Failed to get MTProto worker status")
+            await update.effective_message.reply_text(
+                "❌ **Failed to get worker status.**\n\n"
+                f"Error: {str(e)}\n\n"
+                "Please try again or check the logs manually.",
+                parse_mode=ParseMode.MARKDOWN
+            )
 
     async def _cmd_status(self, update: Update, context: CallbackContext) -> None:
         if not _is_whitelisted(

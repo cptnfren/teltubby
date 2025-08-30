@@ -2,8 +2,8 @@
 Entry point module for teltubby service.
 
 This module wires up configuration, logging, health/metrics, and the Telegram bot
-runtime selection (polling vs webhook). It defers most responsibilities to
-specialized submodules to keep the entry relatively small and readable.
+runtime selection (polling vs webhook). Enhanced with comprehensive health monitoring
+and MTProto worker status tracking.
 """
 
 from __future__ import annotations
@@ -13,6 +13,9 @@ import logging
 import os
 import signal
 from typing import Optional
+
+import uvicorn
+from fastapi import FastAPI
 
 
 def _ensure_event_loop_policy() -> None:
@@ -29,7 +32,7 @@ async def _async_main() -> None:
     """Async entry point that sets up services and starts the bot."""
     from .runtime.config import AppConfig
     from .runtime.logging_setup import setup_logging
-    from .web.health import start_health_server
+    from .web.health import app as health_app
     from .bot.service import TeltubbyBotService
 
     config = AppConfig.from_env()
@@ -38,8 +41,20 @@ async def _async_main() -> None:
     logger = logging.getLogger("teltubby")
     logger.info("starting teltubby", extra={"mode": config.telegram_mode})
 
-    # Start health/metrics server
-    health_runner = await start_health_server(config)
+    # Start health monitoring server in background
+    health_server = uvicorn.Server(
+        config=uvicorn.Config(
+            app=health_app,
+            host="127.0.0.1" if config.bind_health_localhost_only else "0.0.0.0",
+            port=config.health_port,
+            log_level="info",
+            access_log=False
+        )
+    )
+    
+    # Start health server in background task
+    health_task = asyncio.create_task(health_server.serve())
+    logger.info("health monitoring server started", extra={"port": config.health_port})
 
     # Start bot service
     bot = TeltubbyBotService(config)
@@ -57,9 +72,18 @@ async def _async_main() -> None:
         if hasattr(signal, signame):
             loop.add_signal_handler(getattr(signal, signame), _handle_signal, signame)
 
-    await stop_event.wait()
-    await bot.stop()
-    await health_runner.cleanup()
+    try:
+        await stop_event.wait()
+    finally:
+        # Cleanup
+        logger.info("shutting down services")
+        await bot.stop()
+        health_task.cancel()
+        try:
+            await health_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("shutdown complete")
 
 
 def main() -> None:
