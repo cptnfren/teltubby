@@ -98,7 +98,7 @@ class TeltubbyBotService:
             message.sticker or message.video_note
         )
 
-    async def _typing_context(self, chat_id: int):
+    def _typing_context(self, chat_id: int):
         """Context manager for showing typing indicator while processing."""
         class TypingContext:
             def __init__(self, bot, chat_id):
@@ -184,11 +184,14 @@ class TeltubbyBotService:
                         # Get last message for typing context and telemetry
                         last_msg = items[-1]
                         
+                        logger.info(f"Finalizer starting batch processing for {len(items)} items")
+                        
                         # Show typing indicator while processing in finalizer
                         async with self._typing_context(last_msg.chat_id):
                             res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
+                        
                         logger.info(
-                            "Finalizer processed batch",
+                            "Finalizer processed batch successfully",
                             extra={"message_ids": [m.message_id for m in items], "count": len(items)},
                         )
 
@@ -322,9 +325,13 @@ class TeltubbyBotService:
                     await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
                     return
 
+            logger.info(f"Starting batch processing for {len(items)} items")
+            
             # Show typing indicator while processing
             async with self._typing_context(message.chat_id):
                 res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
+            
+            logger.info(f"Batch processing completed successfully")
             
             # Build telemetry data for formatted acknowledgment
             dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
@@ -343,7 +350,7 @@ class TeltubbyBotService:
             ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
             await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
-            logger.exception("ingestion failed")
+            logger.exception(f"ingestion failed for message {message.message_id}: {str(e)}")
             text = TelemetryFormatter.format_ingestion_failed()
             await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
