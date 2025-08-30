@@ -195,30 +195,53 @@ class TeltubbyBotService:
                             extra={"message_ids": [m.message_id for m in items], "count": len(items)},
                         )
 
-                        # Send telemetry ack to the chat (reply to last message in the batch)
-                        try:
-                            dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
-                            media_types = list({o.type for o in res.outcomes if o.s3_key})
-                            skipped = [o for o in res.outcomes if o.skipped_reason]
+                        # Check if the entire batch failed (all items skipped or failed)
+                        successful_items = [o for o in res.outcomes if o.s3_key and not o.skipped_reason]
+                        failed_items = [o for o in res.outcomes if o.skipped_reason]
+                        
+                        if not successful_items and failed_items:
+                            # All items failed - send failure message instead of success
+                            if len(failed_items) > 1:
+                                # Album failure
+                                reason = "All files in album failed to process"
+                            else:
+                                # Single item failure
+                                reason = "File failed to process"
                             
-                            telemetry_data = TelemetryData(
-                                files_count=len([o for o in res.outcomes if o.s3_key]),
-                                media_types=media_types,
-                                base_path=res.base_path,
-                                dedup_count=len(dedup_ordinals),
-                                total_bytes=res.total_bytes_uploaded,
-                                skipped_count=len(skipped)
+                            text = TelemetryFormatter.format_ingestion_failed(
+                                reason=reason,
+                                item_count=len(items)
                             )
-                            
-                            ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
                             await self._app.bot.send_message(
-                                chat_id=last_msg.chat_id, 
-                                reply_to_message_id=last_msg.message_id, 
-                                text=ack,
+                                chat_id=last_msg.chat_id,
+                                text=text,
                                 parse_mode=ParseMode.MARKDOWN
                             )
-                        except Exception:
-                            logger.exception("failed to send telemetry ack from finalizer")
+                        else:
+                            # Some or all items succeeded - send success telemetry
+                            try:
+                                dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
+                                media_types = list({o.type for o in res.outcomes if o.s3_key})
+                                skipped = [o for o in res.outcomes if o.skipped_reason]
+                                
+                                telemetry_data = TelemetryData(
+                                    files_count=len(successful_items),
+                                    media_types=media_types,
+                                    base_path=res.base_path,
+                                    dedup_count=len(dedup_ordinals),
+                                    total_bytes=res.total_bytes_uploaded,
+                                    skipped_count=len(skipped)
+                                )
+                                
+                                ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
+                                await self._app.bot.send_message(
+                                    chat_id=last_msg.chat_id, 
+                                    reply_to_message_id=last_msg.message_id, 
+                                    text=ack,
+                                    parse_mode=ParseMode.MARKDOWN
+                                )
+                            except Exception:
+                                logger.exception("failed to send telemetry ack from finalizer")
                     except Exception as e:
                         logger.exception("finalizer ingestion failed")
                         # Send failure message to user
@@ -353,22 +376,41 @@ class TeltubbyBotService:
             
             logger.info(f"Batch processing completed successfully")
             
-            # Build telemetry data for formatted acknowledgment
-            dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
-            media_types = list({o.type for o in res.outcomes if o.s3_key})
-            skipped = [o for o in res.outcomes if o.skipped_reason]
+            # Check if the entire batch failed (all items skipped or failed)
+            successful_items = [o for o in res.outcomes if o.s3_key and not o.skipped_reason]
+            failed_items = [o for o in res.outcomes if o.skipped_reason]
             
-            telemetry_data = TelemetryData(
-                files_count=len([o for o in res.outcomes if o.s3_key]),
-                media_types=media_types,
-                base_path=res.base_path,
-                dedup_count=len(dedup_ordinals),
-                total_bytes=res.total_bytes_uploaded,
-                skipped_count=len(skipped)
-            )
-            
-            ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
-            await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
+            if not successful_items and failed_items:
+                # All items failed - send failure message instead of success
+                if len(failed_items) > 1:
+                    # Album failure
+                    reason = "All files in album failed to process"
+                else:
+                    # Single item failure
+                    reason = "File failed to process"
+                
+                text = TelemetryFormatter.format_ingestion_failed(
+                    reason=reason,
+                    item_count=len(items)
+                )
+                await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+            else:
+                # Some or all items succeeded - send success telemetry
+                dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
+                media_types = list({o.type for o in res.outcomes if o.s3_key})
+                skipped = [o for o in res.outcomes if o.skipped_reason]
+                
+                telemetry_data = TelemetryData(
+                    files_count=len(successful_items),
+                    media_types=media_types,
+                    base_path=res.base_path,
+                    dedup_count=len(dedup_ordinals),
+                    total_bytes=res.total_bytes_uploaded,
+                    skipped_count=len(skipped)
+                )
+                
+                ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
+                await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
             logger.exception(f"ingestion failed for message {message.message_id}: {str(e)}")
             # Determine failure reason
