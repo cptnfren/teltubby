@@ -844,23 +844,6 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
                     Returns dict with keys: file_id:str, file_unique_id:str, file_size:int|None,
                     file_type:str, file_name:str|None, mime_type:str|None
                     """
-                    
-                async def _check_file_size(m, finfo):
-                    """Check if file is too big for Bot API by attempting to get file info.
-                    Returns (is_too_big: bool, actual_size: int|None)
-                    """
-                    try:
-                        # Try to get file info from Telegram API
-                        tfile = await self._app.bot.get_file(finfo["file_id"])
-                        # If we get here, file is accessible via Bot API
-                        return False, tfile.file_size
-                    except Exception as e:
-                        if "File is too big" in str(e):
-                            # File is too big for Bot API
-                            return True, None
-                        else:
-                            # Other error, assume file is accessible
-                            return False, finfo.get("file_size")
                     if m.photo:
                         ph = max(m.photo or [], key=lambda p: (p.width or 0) * (p.height or 0))
                         return {
@@ -935,8 +918,26 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
                             "mime_type": None,
                         }
                     return None
+                    
+                async def _check_file_size(m, finfo):
+                    """Check if file is too big for Bot API by attempting to get file info.
+                    Returns (is_too_big: bool, actual_size: int|None)
+                    """
+                    try:
+                        # Try to get file info from Telegram API
+                        tfile = await self._app.bot.get_file(finfo["file_id"])
+                        # If we get here, file is accessible via Bot API
+                        return False, tfile.file_size
+                    except Exception as e:
+                        if "File is too big" in str(e):
+                            # File is too big for Bot API
+                            return True, None
+                        else:
+                            # Other error, assume file is accessible
+                            return False, finfo.get("file_size")
 
-                import datetime as _dt, json as _json, time as _time
+                import datetime as _dt
+                import json as _json
                 assert self._jobs and self._dedup
 
                 for m in items:
