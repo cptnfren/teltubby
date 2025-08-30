@@ -201,12 +201,30 @@ class TeltubbyBotService:
                         
                         if not successful_items and failed_items:
                             # All items failed - send failure message instead of success
-                            if len(failed_items) > 1:
-                                # Album failure
-                                reason = "All files in album failed to process"
+                            # Extract factual failure reasons from the outcomes
+                            failure_reasons = []
+                            for outcome in failed_items:
+                                if outcome.skipped_reason:
+                                    if outcome.skipped_reason == "exceeds_bot_limit":
+                                        size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
+                                        failure_reasons.append(f"File {outcome.ordinal}: exceeds 50MB limit ({size_str})")
+                                    elif outcome.skipped_reason == "exceeds_cfg_limit":
+                                        size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
+                                        failure_reasons.append(f"File {outcome.ordinal}: exceeds configured limit ({size_str})")
+                                    elif outcome.skipped_reason == "download_failed":
+                                        failure_reasons.append(f"File {outcome.ordinal}: download failed")
+                                    elif outcome.skipped_reason == "album_validation_failed":
+                                        failure_reasons.append(f"File {outcome.ordinal}: validation failed")
+                                    elif outcome.skipped_reason == "no_media":
+                                        failure_reasons.append(f"File {outcome.ordinal}: no media content")
+                                    else:
+                                        failure_reasons.append(f"File {outcome.ordinal}: {outcome.skipped_reason}")
+                            
+                            # Combine all failure reasons
+                            if len(failure_reasons) > 1:
+                                reason = "Album failures:\n• " + "\n• ".join(failure_reasons)
                             else:
-                                # Single item failure
-                                reason = "File failed to process"
+                                reason = failure_reasons[0] if failure_reasons else "Unknown failure"
                             
                             text = TelemetryFormatter.format_ingestion_failed(
                                 reason=reason,
@@ -246,12 +264,15 @@ class TeltubbyBotService:
                         logger.exception("finalizer ingestion failed")
                         # Send failure message to user
                         try:
-                            if "album_validation_failed" in str(e):
-                                reason = "Album validation failed - all files must be processable"
-                            elif "File is too big" in str(e):
-                                reason = "File exceeds Telegram bot API size limit (50MB)"
+                            error_str = str(e)
+                            if "album_validation_failed" in error_str:
+                                reason = "Album validation failed: " + error_str
+                            elif "File is too big" in error_str:
+                                reason = "Telegram API error: File is too big (exceeds 50MB limit)"
+                            elif "download_failed" in error_str:
+                                reason = "Download error: " + error_str
                             else:
-                                reason = "Processing error occurred"
+                                reason = f"Processing error: {error_str}"
                             
                             text = TelemetryFormatter.format_ingestion_failed(
                                 reason=reason, 
@@ -382,12 +403,30 @@ class TeltubbyBotService:
             
             if not successful_items and failed_items:
                 # All items failed - send failure message instead of success
-                if len(failed_items) > 1:
-                    # Album failure
-                    reason = "All files in album failed to process"
+                # Extract factual failure reasons from the outcomes
+                failure_reasons = []
+                for outcome in failed_items:
+                    if outcome.skipped_reason:
+                        if outcome.skipped_reason == "exceeds_bot_limit":
+                            size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
+                            failure_reasons.append(f"File {outcome.ordinal}: exceeds 50MB limit ({size_str})")
+                        elif outcome.skipped_reason == "exceeds_cfg_limit":
+                            size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
+                            failure_reasons.append(f"File {outcome.ordinal}: exceeds configured limit ({size_str})")
+                        elif outcome.skipped_reason == "download_failed":
+                            failure_reasons.append(f"File {outcome.ordinal}: download failed")
+                        elif outcome.skipped_reason == "album_validation_failed":
+                            failure_reasons.append(f"File {outcome.ordinal}: validation failed")
+                        elif outcome.skipped_reason == "no_media":
+                            failure_reasons.append(f"File {outcome.ordinal}: no media content")
+                        else:
+                            failure_reasons.append(f"File {outcome.ordinal}: {outcome.skipped_reason}")
+                
+                # Combine all failure reasons
+                if len(failure_reasons) > 1:
+                    reason = "Album failures:\n• " + "\n• ".join(failure_reasons)
                 else:
-                    # Single item failure
-                    reason = "File failed to process"
+                    reason = failure_reasons[0] if failure_reasons else "Unknown failure"
                 
                 text = TelemetryFormatter.format_ingestion_failed(
                     reason=reason,
@@ -413,13 +452,16 @@ class TeltubbyBotService:
                 await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
             logger.exception(f"ingestion failed for message {message.message_id}: {str(e)}")
-            # Determine failure reason
-            if "File is too big" in str(e):
-                reason = "File exceeds Telegram bot API size limit (50MB)"
-            elif "album_validation_failed" in str(e):
-                reason = "Album validation failed - all files must be processable"
+            # Extract factual error details
+            error_str = str(e)
+            if "File is too big" in error_str:
+                reason = "Telegram API error: File is too big (exceeds 50MB limit)"
+            elif "album_validation_failed" in error_str:
+                reason = "Album validation failed: " + error_str
+            elif "download_failed" in error_str:
+                reason = "Download error: " + error_str
             else:
-                reason = "Processing error occurred"
+                reason = f"Processing error: {error_str}"
             
             text = TelemetryFormatter.format_ingestion_failed(
                 reason=reason, 
