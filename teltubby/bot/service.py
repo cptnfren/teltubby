@@ -844,6 +844,23 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
                     Returns dict with keys: file_id:str, file_unique_id:str, file_size:int|None,
                     file_type:str, file_name:str|None, mime_type:str|None
                     """
+                    
+                async def _check_file_size(m, finfo):
+                    """Check if file is too big for Bot API by attempting to get file info.
+                    Returns (is_too_big: bool, actual_size: int|None)
+                    """
+                    try:
+                        # Try to get file info from Telegram API
+                        tfile = await self._app.bot.get_file(finfo["file_id"])
+                        # If we get here, file is accessible via Bot API
+                        return False, tfile.file_size
+                    except Exception as e:
+                        if "File is too big" in str(e):
+                            # File is too big for Bot API
+                            return True, None
+                        else:
+                            # Other error, assume file is accessible
+                            return False, finfo.get("file_size")
                     if m.photo:
                         ph = max(m.photo or [], key=lambda p: (p.width or 0) * (p.height or 0))
                         return {
@@ -928,16 +945,20 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
                     if not finfo or finfo.get("file_id") is None:
                         to_process.append(m)
                         continue
-                    size_hint = finfo.get("file_size") or 0
+                    
+                    # Check if file is too big for Bot API
+                    is_too_big, actual_size = await _check_file_size(m, finfo)
+                    size_hint = finfo.get("file_size") or actual_size or 0
                     
                     # Debug logging for file size routing
-                    routing_to_mtproto = size_hint and size_hint > bot_limit
+                    routing_to_mtproto = is_too_big or (size_hint and size_hint > bot_limit)
                     logger.info(
-                        f"File size check: size_hint={size_hint}, "
-                        f"bot_limit={bot_limit}, routing_to_mtproto={routing_to_mtproto}"
+                        f"File size check: size_hint={size_hint}, actual_size={actual_size}, "
+                        f"is_too_big={is_too_big}, bot_limit={bot_limit}, "
+                        f"routing_to_mtproto={routing_to_mtproto}"
                     )
                     
-                    if size_hint and size_hint > bot_limit:
+                    if is_too_big or (size_hint and size_hint > bot_limit):
                         # Create and publish a job
                         job_id = self._jobs.new_job_id()
                         created_at = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
