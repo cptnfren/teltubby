@@ -55,6 +55,7 @@ class TeltubbyBotService:
         self._dedup: Optional[DedupIndex] = None
         self._albums = AlbumAggregator(window_seconds=config.album_aggregation_window_seconds)
         self._quota: Optional[QuotaManager] = None
+        self._finalizer_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         builder = (
@@ -81,9 +82,13 @@ class TeltubbyBotService:
         self._dedup = DedupIndex(self._config)
         self._quota = QuotaManager(self._config, self._s3)
 
+
+        
         # Lifecycle per PTB v21
         await self._app.initialize()
         await self._app.start()
+        # Start periodic finalizer
+        self._finalizer_task = asyncio.create_task(self._finalizer_loop())
         if self._config.telegram_mode == "webhook":
             await self._app.updater.start_webhook(listen="0.0.0.0", port=8080)
             if self._config.webhook_url:
@@ -93,7 +98,22 @@ class TeltubbyBotService:
 
         logger.info("bot started", extra={"mode": self._config.telegram_mode})
 
+    def _has_media_content(self, message) -> bool:
+        """Check if message contains any media content."""
+        return bool(
+            message.photo or message.document or message.video or 
+            message.audio or message.voice or message.animation or 
+            message.sticker or message.video_note
+        )
+
     async def stop(self) -> None:
+        # Stop finalizer loop
+        if self._finalizer_task:
+            self._finalizer_task.cancel()
+            try:
+                await self._finalizer_task
+            except Exception:
+                pass
         if not self._app:
             return
         try:
@@ -108,6 +128,52 @@ class TeltubbyBotService:
             await self._app.shutdown()
         except Exception:
             pass
+
+    async def _finalizer_loop(self) -> None:
+        """Periodically flush expired albums so ingestion continues.
+
+        Runs every 1 second. If any albums are ready, process them in the
+        same way as _on_message would after aggregation completes.
+        """
+        assert self._app and self._s3 and self._dedup
+        logger.info("album finalizer loop started")
+        try:
+            while True:
+                await asyncio.sleep(1)
+                ready_batches = await self._albums.pop_ready_albums()
+                for items in ready_batches:
+                    try:
+                        # Quota pause at 100%
+                        if self._quota and self._config.bucket_quota_bytes:
+                            ratio = self._quota.used_ratio()
+                            if ratio is not None and ratio >= 1.0:
+                                # Can't reply to a specific message here; skip processing
+                                continue
+                        res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
+                        logger.info(
+                            "Finalizer processed batch",
+                            extra={"message_ids": [m.message_id for m in items], "count": len(items)},
+                        )
+
+                        # Send telemetry ack to the chat (reply to last message in the batch)
+                        try:
+                            last_msg = items[-1]
+                            dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
+                            media_types = list({o.type for o in res.outcomes if o.s3_key})
+                            skipped = [o for o in res.outcomes if o.skipped_reason]
+                            ack = (
+                                f"files={len([o for o in res.outcomes if o.s3_key])} "
+                                f"types={','.join(media_types)} base={res.base_path} "
+                                f"dedup={len(dedup_ordinals)} bytes={res.total_bytes_uploaded} "
+                                f"skipped={len(skipped)}"
+                            )
+                            await self._app.bot.send_message(chat_id=last_msg.chat_id, reply_to_message_id=last_msg.message_id, text=ack)
+                        except Exception:
+                            logger.exception("failed to send telemetry ack from finalizer")
+                    except Exception:
+                        logger.exception("finalizer ingestion failed")
+        except asyncio.CancelledError:
+            logger.info("album finalizer loop stopped")
 
     async def _cmd_start(self, update: Update, context: CallbackContext) -> None:
         if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
@@ -151,16 +217,48 @@ class TeltubbyBotService:
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Enforce DM-only and whitelist; ignore silently otherwise
+        logger.info("Message received", extra={
+            "chat_type": update.effective_chat.type if update.effective_chat else "None",
+            "user_id": update.effective_user.id if update.effective_user else "None",
+            "message_id": (update.effective_message.message_id 
+                          if update.effective_message else "None"),
+            "has_media": bool(update.effective_message and 
+                             update.effective_message.media_group_id)
+        })
+        
         if not (update.effective_chat and update.effective_chat.type == "private"):
+            logger.info("Ignoring non-DM message")
             return
         if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
+            logger.info("Ignoring non-whitelisted user", extra={"user_id": update.effective_user.id if update.effective_user else "None"})
             return
         if not (self._s3 and self._dedup and self._app):
+            logger.warning("Services not initialized")
             return
         message = update.effective_message
+        
+        # Only process messages with actual media content
+        if not self._has_media_content(message):
+            logger.info("Ignoring message without media content")
+            return
+            
+        logger.info("Processing media message", extra={
+            "message_id": message.message_id,
+            "media_group_id": message.media_group_id,
+            "has_photo": bool(message.photo),
+            "has_document": bool(message.document),
+            "has_video": bool(message.video)
+        })
+            
         items = await self._albums.add_and_maybe_wait(message)
         if items is None:
+            logger.info("Message added to album aggregation, waiting for more items")
             return
+        else:
+            logger.info("Album ready for processing", extra={
+                "item_count": len(items),
+                "message_ids": [m.message_id for m in items]
+            })
         # Process batch
         try:
             # Quota pause at 100%
