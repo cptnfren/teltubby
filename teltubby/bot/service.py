@@ -98,6 +98,45 @@ class TeltubbyBotService:
             message.sticker or message.video_note
         )
 
+    async def _typing_context(self, chat_id: int):
+        """Context manager for showing typing indicator while processing."""
+        class TypingContext:
+            def __init__(self, bot, chat_id):
+                self.bot = bot
+                self.chat_id = chat_id
+                self._typing_task = None
+            
+            async def __aenter__(self):
+                """Start typing indicator."""
+                if self.bot:
+                    self._typing_task = asyncio.create_task(self._keep_typing())
+                return self
+            
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                """Stop typing indicator."""
+                if self._typing_task:
+                    self._typing_task.cancel()
+                    try:
+                        await self._typing_task
+                    except asyncio.CancelledError:
+                        pass
+            
+            async def _keep_typing(self):
+                """Keep typing indicator active while processing."""
+                try:
+                    while True:
+                        await self.bot.send_chat_action(
+                            chat_id=self.chat_id, 
+                            action="typing"
+                        )
+                        await asyncio.sleep(4)  # Telegram typing expires after ~5 seconds
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.warning("Failed to send typing indicator", extra={"error": str(e)})
+        
+        return TypingContext(self._app.bot if self._app else None, chat_id)
+
     async def stop(self) -> None:
         # Stop finalizer loop
         if self._finalizer_task:
@@ -141,7 +180,13 @@ class TeltubbyBotService:
                             if ratio is not None and ratio >= 1.0:
                                 # Can't reply to a specific message here; skip processing
                                 continue
-                        res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
+                        
+                        # Get last message for typing context and telemetry
+                        last_msg = items[-1]
+                        
+                        # Show typing indicator while processing in finalizer
+                        async with self._typing_context(last_msg.chat_id):
+                            res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
                         logger.info(
                             "Finalizer processed batch",
                             extra={"message_ids": [m.message_id for m in items], "count": len(items)},
@@ -149,7 +194,6 @@ class TeltubbyBotService:
 
                         # Send telemetry ack to the chat (reply to last message in the batch)
                         try:
-                            last_msg = items[-1]
                             dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
                             media_types = list({o.type for o in res.outcomes if o.s3_key})
                             skipped = [o for o in res.outcomes if o.skipped_reason]
@@ -186,6 +230,10 @@ class TeltubbyBotService:
     async def _cmd_status(self, update: Update, context: CallbackContext) -> None:
         if not _is_whitelisted(update.effective_user and update.effective_user.id, self._config):
             return
+        
+        # Show typing indicator while checking status
+        await update.effective_chat.send_action("typing")
+        
         used_ratio = self._quota.used_ratio() if self._quota else None
         text = TelemetryFormatter.format_status(self._config.telegram_mode, used_ratio)
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
@@ -195,6 +243,10 @@ class TeltubbyBotService:
             return
         if not self._quota:
             return
+        
+        # Show typing indicator while calculating quota
+        await update.effective_chat.send_action("typing")
+        
         used_ratio = self._quota.used_ratio()
         if used_ratio is None:
             await update.effective_message.reply_text("Quota unknown (no bucket quota configured).")
@@ -270,7 +322,9 @@ class TeltubbyBotService:
                     await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
                     return
 
-            res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
+            # Show typing indicator while processing
+            async with self._typing_context(message.chat_id):
+                res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
             
             # Build telemetry data for formatted acknowledgment
             dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
