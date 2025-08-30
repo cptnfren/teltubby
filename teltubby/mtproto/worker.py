@@ -118,7 +118,18 @@ class Worker:
         self._conn = await aio_pika.connect_robust(url)
         self._ch = await self._conn.channel()
         await self._ch.set_qos(prefetch_count=max(1, self._cfg.worker_concurrency))
-        self._queue = await self._ch.declare_queue(self._cfg.job_queue_name, durable=True)
+        
+        # Declare queue with same arguments as job_manager to avoid conflicts
+        args: Dict[str, Any] = {
+            "x-dead-letter-exchange": self._cfg.job_dlx_exchange,
+            "x-dead-letter-routing-key": self._cfg.job_dead_letter_queue,
+            "x-max-priority": 9,
+        }
+        self._queue = await self._ch.declare_queue(
+            self._cfg.job_queue_name, 
+            durable=True,
+            arguments=args
+        )
 
         await self._queue.consume(self._on_message)
         logger.info("worker started", extra={"queue": self._cfg.job_queue_name})

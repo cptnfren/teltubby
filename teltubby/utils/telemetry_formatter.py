@@ -162,12 +162,22 @@ class TelemetryFormatter:
             f"• {cls.EMOJIS['storage']} Store media with deterministic filenames\n"
             f"• {cls.EMOJIS['duplicate']} Automatically deduplicate content\n"
             f"• {cls.EMOJIS['archive']} Generate structured JSON metadata\n\n"
-            f"{cls.EMOJIS['info']} **Commands:**\n"
-            f"• `/status` - Check bot status and storage\n"
+            f"{cls.EMOJIS['info']} **All Available Commands:**\n"
+            f"• `/start` - Show this welcome message\n"
+            f"• `/help` - Show detailed command reference\n"
+            f"• `/status` - Check bot status and system health\n"
             f"• `/quota` - View storage quota usage\n"
             f"• `/mode` - Show current operation mode\n"
-            f"• `/db_maint` - Database maintenance\n\n"
-            f"{cls.EMOJIS['success']} Just forward or copy messages to me in DM!"
+            f"• `/db_maint` - Database maintenance\n"
+            f"• `/mtcode <code>` - Submit MTProto verification code\n"
+            f"• `/mtpass <password>` - Submit 2FA password\n"
+            f"• `/mtstatus` - Check MTProto worker status\n"
+            f"• `/queue` - List recent jobs in queue\n"
+            f"• `/jobs <id>` - Show job details\n"
+            f"• `/retry <id>` - Retry failed job\n"
+            f"• `/cancel <id>` - Cancel pending job\n\n"
+            f"{cls.EMOJIS['success']} Just forward or copy messages to me in DM!\n\n"
+            f"{cls.EMOJIS['info']} **Tip:** Use `/help` for detailed usage instructions!"
         )
     
     @classmethod
@@ -183,10 +193,14 @@ class TelemetryFormatter:
     def format_mode(cls, mode: str) -> str:
         """Format mode command response."""
         mode_emoji = "🌐" if mode == "webhook" else "📡"
+        webhook_desc = "Webhook mode with external endpoint"
+        polling_desc = "Long polling mode for development"
+        mode_desc = webhook_desc if mode == "webhook" else polling_desc
+        
         return (
             f"{cls.EMOJIS['mode']} **Operation Mode** {mode_emoji}\n\n"
             f"{cls.EMOJIS['info']} Current mode: **{mode}**\n"
-            f"{cls.EMOJIS['info']} {'Webhook mode with external endpoint' if mode == 'webhook' else 'Long polling mode for development'}"
+            f"{cls.EMOJIS['info']} {mode_desc}"
         )
     
     @classmethod
@@ -199,7 +213,7 @@ class TelemetryFormatter:
         )
     
     @classmethod
-    def format_ingestion_failed(cls, reason: str = None, item_count: int = 1) -> str:
+    def format_ingestion_failed(cls, reason: str | None = None, item_count: int = 1) -> str:
         """Format ingestion failure message with specific reason."""
         if reason:
             reason_text = f"\n{cls.EMOJIS['info']} **Reason:** {reason}"
@@ -207,7 +221,10 @@ class TelemetryFormatter:
             reason_text = ""
         
         if item_count > 1:
-            album_text = f"\n{cls.EMOJIS['info']} **Note:** Albums require all files to be processed successfully."
+            album_text = (
+                f"\n{cls.EMOJIS['info']} **Note:** "
+                f"Albums require all files to be processed successfully."
+            )
         else:
             album_text = ""
         
