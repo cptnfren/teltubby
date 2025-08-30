@@ -368,19 +368,20 @@ class TeltubbyBotService:
             "has_video": bool(message.video)
         })
             
-        items = await self._albums.add_and_maybe_wait(message)
-        if items is None:
-            logger.info("Message added to album aggregation, waiting for more items")
-            return
-        else:
-            logger.info("Album ready for processing", extra={
-                "item_count": len(items),
-                "message_ids": [m.message_id for m in items]
-            })
-        
-        # Show typing indicator immediately - before any processing
-        try:
-            async with self._typing_context(message.chat_id):
+        # Show typing indicator IMMEDIATELY after basic validation - before any workflow tasks
+        async with self._typing_context(message.chat_id):
+            # Now handle album aggregation and processing within typing context
+            items = await self._albums.add_and_maybe_wait(message)
+            if items is None:
+                logger.info("Message added to album aggregation, waiting for more items")
+                return
+            else:
+                logger.info("Album ready for processing", extra={
+                    "item_count": len(items),
+                    "message_ids": [m.message_id for m in items]
+                })
+            
+            try:
                 # Quota pause at 100%
                 if self._quota and self._config.bucket_quota_bytes:
                     ratio = self._quota.used_ratio()
@@ -449,22 +450,22 @@ class TeltubbyBotService:
                     
                     ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
                     await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.exception(f"ingestion failed for message {message.message_id}: {str(e)}")
-            # Extract factual error details
-            error_str = str(e)
-            if "File is too big" in error_str:
-                reason = "Telegram API error: File is too big (exceeds 50MB limit)"
-            elif "album_validation_failed" in error_str:
-                reason = "Album validation failed: " + error_str
-            elif "download_failed" in error_str:
-                reason = "Download error: " + error_str
-            else:
-                reason = f"Processing error: {error_str}"
-            
-            text = TelemetryFormatter.format_ingestion_failed(
-                reason=reason, 
-                item_count=len(items)
-            )
-            await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+            except Exception as e:
+                logger.exception(f"ingestion failed for message {message.message_id}: {str(e)}")
+                # Extract factual error details
+                error_str = str(e)
+                if "File is too big" in error_str:
+                    reason = "Telegram API error: File is too big (exceeds 50MB limit)"
+                elif "album_validation_failed" in error_str:
+                    reason = "Album validation failed: " + error_str
+                elif "download_failed" in error_str:
+                    reason = "Download error: " + error_str
+                else:
+                    reason = f"Processing error: {error_str}"
+                
+                text = TelemetryFormatter.format_ingestion_failed(
+                    reason=reason, 
+                    item_count=len(items)
+                )
+                await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
