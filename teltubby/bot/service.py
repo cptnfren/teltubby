@@ -379,77 +379,77 @@ class TeltubbyBotService:
                 "item_count": len(items),
                 "message_ids": [m.message_id for m in items]
             })
-        # Process batch
+        # Show typing indicator immediately - before any processing
         try:
-            # Quota pause at 100%
-            if self._quota and self._config.bucket_quota_bytes:
-                ratio = self._quota.used_ratio()
-                if ratio is not None and ratio >= 1.0:
-                    text = TelemetryFormatter.format_quota_pause()
-                    await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-                    return
-
-            logger.info(f"Starting batch processing for {len(items)} items")
-            
-            # Show typing indicator while processing
             async with self._typing_context(message.chat_id):
+                # Quota pause at 100%
+                if self._quota and self._config.bucket_quota_bytes:
+                    ratio = self._quota.used_ratio()
+                    if ratio is not None and ratio >= 1.0:
+                        text = TelemetryFormatter.format_quota_pause()
+                        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+                        return
+
+                logger.info(f"Starting batch processing for {len(items)} items")
+                
+                # Process batch
                 res = await process_batch(self._config, self._s3, self._dedup, self._app.bot, items)
-            
-            logger.info(f"Batch processing completed successfully")
-            
-            # Check if the entire batch failed (all items skipped or failed)
-            successful_items = [o for o in res.outcomes if o.s3_key and not o.skipped_reason]
-            failed_items = [o for o in res.outcomes if o.skipped_reason]
-            
-            if not successful_items and failed_items:
-                # All items failed - send failure message instead of success
-                # Extract factual failure reasons from the outcomes
-                failure_reasons = []
-                for outcome in failed_items:
-                    if outcome.skipped_reason:
-                        if outcome.skipped_reason == "exceeds_bot_limit":
-                            size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
-                            failure_reasons.append(f"File {outcome.ordinal}: exceeds 50MB limit ({size_str})")
-                        elif outcome.skipped_reason == "exceeds_cfg_limit":
-                            size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
-                            failure_reasons.append(f"File {outcome.ordinal}: exceeds configured limit ({size_str})")
-                        elif outcome.skipped_reason == "download_failed":
-                            failure_reasons.append(f"File {outcome.ordinal}: download failed")
-                        elif outcome.skipped_reason == "album_validation_failed":
-                            failure_reasons.append(f"File {outcome.ordinal}: validation failed")
-                        elif outcome.skipped_reason == "no_media":
-                            failure_reasons.append(f"File {outcome.ordinal}: no media content")
-                        else:
-                            failure_reasons.append(f"File {outcome.ordinal}: {outcome.skipped_reason}")
                 
-                # Combine all failure reasons
-                if len(failure_reasons) > 1:
-                    reason = "Album failures:\n• " + "\n• ".join(failure_reasons)
+                logger.info(f"Batch processing completed successfully")
+                
+                # Check if the entire batch failed (all items skipped or failed)
+                successful_items = [o for o in res.outcomes if o.s3_key and not o.skipped_reason]
+                failed_items = [o for o in res.outcomes if o.skipped_reason]
+                
+                if not successful_items and failed_items:
+                    # All items failed - send failure message instead of success
+                    # Extract factual failure reasons from the outcomes
+                    failure_reasons = []
+                    for outcome in failed_items:
+                        if outcome.skipped_reason:
+                            if outcome.skipped_reason == "exceeds_bot_limit":
+                                size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
+                                failure_reasons.append(f"File {outcome.ordinal}: exceeds 50MB limit ({size_str})")
+                            elif outcome.skipped_reason == "exceeds_cfg_limit":
+                                size_str = f"{outcome.size_bytes or 'unknown'} bytes" if outcome.size_bytes else "unknown size"
+                                failure_reasons.append(f"File {outcome.ordinal}: exceeds configured limit ({size_str})")
+                            elif outcome.skipped_reason == "download_failed":
+                                failure_reasons.append(f"File {outcome.ordinal}: download failed")
+                            elif outcome.skipped_reason == "album_validation_failed":
+                                failure_reasons.append(f"File {outcome.ordinal}: validation failed")
+                            elif outcome.skipped_reason == "no_media":
+                                failure_reasons.append(f"File {outcome.ordinal}: no media content")
+                            else:
+                                failure_reasons.append(f"File {outcome.ordinal}: {outcome.skipped_reason}")
+                    
+                    # Combine all failure reasons
+                    if len(failure_reasons) > 1:
+                        reason = "Album failures:\n• " + "\n• ".join(failure_reasons)
+                    else:
+                        reason = failure_reasons[0] if failure_reasons else "Unknown failure"
+                    
+                    text = TelemetryFormatter.format_ingestion_failed(
+                        reason=reason,
+                        item_count=len(items)
+                    )
+                    await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
                 else:
-                    reason = failure_reasons[0] if failure_reasons else "Unknown failure"
-                
-                text = TelemetryFormatter.format_ingestion_failed(
-                    reason=reason,
-                    item_count=len(items)
-                )
-                await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-            else:
-                # Some or all items succeeded - send success telemetry
-                dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
-                media_types = list({o.type for o in res.outcomes if o.s3_key})
-                skipped = [o for o in res.outcomes if o.skipped_reason]
-                
-                telemetry_data = TelemetryData(
-                    files_count=len(successful_items),
-                    media_types=media_types,
-                    base_path=res.base_path,
-                    dedup_count=len(dedup_ordinals),
-                    total_bytes=res.total_bytes_uploaded,
-                    skipped_count=len(skipped)
-                )
-                
-                ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
-                await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
+                    # Some or all items succeeded - send success telemetry
+                    dedup_ordinals = [o.ordinal for o in res.outcomes if o.is_duplicate]
+                    media_types = list({o.type for o in res.outcomes if o.s3_key})
+                    skipped = [o for o in res.outcomes if o.skipped_reason]
+                    
+                    telemetry_data = TelemetryData(
+                        files_count=len(successful_items),
+                        media_types=media_types,
+                        base_path=res.base_path,
+                        dedup_count=len(dedup_ordinals),
+                        total_bytes=res.total_bytes_uploaded,
+                        skipped_count=len(skipped)
+                    )
+                    
+                    ack = TelemetryFormatter.format_ingestion_ack(telemetry_data)
+                    await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
             logger.exception(f"ingestion failed for message {message.message_id}: {str(e)}")
             # Extract factual error details
