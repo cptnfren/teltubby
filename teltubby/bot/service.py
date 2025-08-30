@@ -74,8 +74,6 @@ class TeltubbyBotService:
         self._dedup = DedupIndex(self._config)
         self._quota = QuotaManager(self._config, self._s3)
 
-
-        
         # Lifecycle per PTB v21
         await self._app.initialize()
         await self._app.start()
@@ -379,6 +377,7 @@ class TeltubbyBotService:
                 "item_count": len(items),
                 "message_ids": [m.message_id for m in items]
             })
+        
         # Show typing indicator immediately - before any processing
         try:
             async with self._typing_context(message.chat_id):
