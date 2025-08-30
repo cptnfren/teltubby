@@ -12,7 +12,6 @@ Notes:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
@@ -59,7 +58,11 @@ class MTProtoClient:
         """Create and start the Telethon client, attempting login if needed."""
         assert self._cfg.mtproto_api_id and self._cfg.mtproto_api_hash
         session_path = self._cfg.mtproto_session_path or "/data/mtproto.session"
-        self._client = TelegramClient(session_path, self._cfg.mtproto_api_id, self._cfg.mtproto_api_hash)
+        self._client = TelegramClient(
+            session_path, 
+            self._cfg.mtproto_api_id, 
+            self._cfg.mtproto_api_hash
+        )
         await self._client.connect()
 
         if not await self._client.is_user_authorized():
@@ -72,7 +75,11 @@ class MTProtoClient:
             else:
                 raise RuntimeError("Login code required but no hook provided")
             try:
-                await self._client.sign_in(self._cfg.mtproto_phone_number, code, phone_code_hash=sent.phone_code_hash)
+                await self._client.sign_in(
+                    self._cfg.mtproto_phone_number, 
+                    code, 
+                    phone_code_hash=sent.phone_code_hash
+                )
             except SessionPasswordNeededError:
                 if not self._hooks.request_password:
                     raise RuntimeError("2FA password required but no hook provided")
@@ -88,6 +95,74 @@ class MTProtoClient:
             await self._client.disconnect()
             self._client = None
 
+    async def download_file_by_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        dest_path: str,
+        on_progress: Optional[ProgressCb] = None,
+    ) -> int:
+        """Download a file from a specific message to a local path.
+
+        Parameters:
+        - chat_id: int - Telegram chat ID
+        - message_id: int - Telegram message ID
+        - dest_path: str - filesystem path to write
+        - on_progress: Optional[ProgressCb] - async progress callback
+
+        Returns:
+        - int: Size of downloaded file in bytes
+
+        Raises:
+        - RuntimeError: If client not connected or message not found
+        - ValueError: If message has no media
+        """
+        if not self._client:
+            raise RuntimeError("MTProto client not connected")
+
+        try:
+            # Get the message by chat_id and message_id
+            message = await self._client.get_messages(chat_id, ids=message_id)
+            
+            if not message:
+                raise ValueError(f"Message {message_id} not found in chat {chat_id}")
+            
+            if not message.media:
+                raise ValueError(f"Message {message_id} has no media content")
+            
+            # Download the media file
+            logger.info(f"Downloading media from message {message_id} in chat {chat_id}")
+            
+            # Use Telethon's download_media method with progress callback
+            if on_progress:
+                # Create a progress callback wrapper
+                async def progress_callback(received_bytes: int, total_bytes: int):
+                    await on_progress(received_bytes, total_bytes)
+                
+                downloaded_path = await self._client.download_media(
+                    message.media,
+                    dest_path,
+                    progress_callback=progress_callback
+                )
+            else:
+                downloaded_path = await self._client.download_media(
+                    message.media,
+                    dest_path
+                )
+            
+            # Verify the file was downloaded and get its size
+            import os
+            if os.path.exists(downloaded_path):
+                file_size = os.path.getsize(downloaded_path)
+                logger.info(f"Successfully downloaded {file_size} bytes to {downloaded_path}")
+                return file_size
+            else:
+                raise RuntimeError(f"Download completed but file not found at {downloaded_path}")
+                
+        except Exception as e:
+            logger.error(f"Failed to download file from message {message_id}: {e}")
+            raise
+
     async def download_file_by_link(
         self,
         msg_link: str,
@@ -102,10 +177,6 @@ class MTProtoClient:
         - on_progress: Optional[ProgressCb] - async progress callback
         """
         assert self._client
-        from telethon.tl.functions.messages import ImportChatInviteRequest  # lazy import
-        from telethon.tl.functions.messages import GetMessagesRequest
-        from telethon.utils import parse_username
-
         # NOTE: Full link parsing is complex; Phase 2 will focus on file_id-based
         # downloads via job payload and chat/message ids resolved by worker. This
         # method is kept for future completeness.

@@ -79,6 +79,7 @@ class TeltubbyBotService:
         self._app.add_handler(CommandHandler("jobs", self._cmd_jobs))
         self._app.add_handler(CommandHandler("retry", self._cmd_retry))
         self._app.add_handler(CommandHandler("cancel", self._cmd_cancel))
+        self._app.add_handler(CommandHandler("purge", self._cmd_purge))
 
         # Ingestion: only messages with media content in DMs
         self._app.add_handler(
@@ -587,6 +588,7 @@ Welcome to Teltubby! This bot archives media files from Telegram conversations u
 ## 🛠️ **System Maintenance Commands**
 
 **`/db_maint`** - Perform database maintenance (VACUUM operation)
+**`/purge confirm`** - **DESTRUCTIVE**: Purge entire system (storage, database, queue)
 
 ## 📁 **How to Use**
 
@@ -632,6 +634,15 @@ Welcome to Teltubby! This bot archives media files from Telegram conversations u
 - **Need to re-authenticate?** Use `/mtcode` with the new verification code
 - **Jobs failing?** Check `/queue` and use `/retry` for failed jobs
 - **Storage full?** Check `/quota` for current usage
+
+## ⚠️ **Dangerous Commands**
+
+**`/purge confirm`** - This command will **PERMANENTLY DELETE** all data:
+- All files in storage bucket
+- All database records (files, jobs, authentication)
+- All pending jobs in queue
+
+**Use only for debugging or security purposes. This action cannot be undone!**
 
 ## 📞 **Support**
 
@@ -1309,4 +1320,103 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
                     item_count=len(items)
                 )
                 await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+    async def _cmd_purge(self, update: Update, context: CallbackContext) -> None:
+        """Purge entire system: storage bucket, database, and job queue.
+        
+        This is a DESTRUCTIVE operation that requires confirmation.
+        Use only for debugging or security purposes.
+        """
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+        
+        # Check if this is a confirmation
+        args = context.args if hasattr(context, "args") else []
+        
+        if not args or args[0] != "confirm":
+            # Show warning and require confirmation
+            warning_text = (
+                f"⚠️ **SYSTEM PURGE WARNING** ⚠️\n\n"
+                f"This command will **PERMANENTLY DELETE**:\n"
+                f"• All files in storage bucket\n"
+                f"• All database records (files, jobs, auth)\n"
+                f"• All pending jobs in queue\n\n"
+                f"**This action cannot be undone!**\n\n"
+                f"To proceed, use:\n"
+                f"`/purge confirm`\n\n"
+                f"⚠️ **Use only for debugging or security!**"
+            )
+            await update.effective_message.reply_text(
+                warning_text, parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # User confirmed - proceed with purge
+        try:
+            await update.effective_message.reply_text(
+                "🔄 **Starting system purge...**\n\n"
+                "This may take a few moments. Please wait."
+            )
+            
+            purge_results = {}
+            
+            # 1. Purge storage bucket
+            if self._s3:
+                try:
+                    deleted_files = self._s3.purge_bucket()
+                    purge_results["storage"] = deleted_files
+                except Exception as e:
+                    purge_results["storage_error"] = str(e)
+            
+            # 2. Purge database
+            if self._dedup:
+                try:
+                    db_counts = self._dedup.purge_all()
+                    purge_results["database"] = db_counts
+                except Exception as e:
+                    purge_results["database_error"] = str(e)
+            
+            # 3. Purge job queue
+            if self._jobs:
+                try:
+                    purged_jobs = await self._jobs.purge_queue()
+                    purge_results["queue"] = purged_jobs
+                except Exception as e:
+                    purge_results["queue_error"] = str(e)
+            
+            # Format results
+            result_text = "✅ **System Purge Complete**\n\n"
+            
+            if "storage" in purge_results:
+                result_text += f"🗂️ **Storage:** {purge_results['storage']} files deleted\n"
+            if "storage_error" in purge_results:
+                result_text += f"❌ **Storage Error:** {purge_results['storage_error']}\n"
+            
+            if "database" in purge_results:
+                db_info = purge_results["database"]
+                result_text += f"🗄️ **Database:** {db_info.get('files', 0)} files, "
+                result_text += f"{db_info.get('jobs', 0)} jobs, "
+                result_text += f"{db_info.get('auth_secrets', 0)} secrets deleted\n"
+            if "database_error" in purge_results:
+                result_text += f"❌ **Database Error:** {purge_results['database_error']}\n"
+            
+            if "queue" in purge_results:
+                result_text += f"📥 **Queue:** {purge_results['queue']} jobs purged\n"
+            if "queue_error" in purge_results:
+                result_text += f"❌ **Queue Error:** {purge_results['queue_error']}\n"
+            
+            result_text += "\n🚀 **System has been reset to clean state**"
+            
+            await update.effective_message.reply_text(
+                result_text, parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            error_text = f"❌ **Purge failed:** {str(e)}\n\nContact administrator."
+            await update.effective_message.reply_text(
+                error_text, parse_mode=ParseMode.MARKDOWN
+            )
 

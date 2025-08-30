@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import io
 import json
 import logging
 import os
@@ -367,12 +366,52 @@ class Worker:
                         f.seek(max(0, size_bytes - 1))
                         f.write(b"\0")
                 else:
-                    # TODO: Implement real MTProto download by message/chat id in Phase 2.1
-                    size_bytes = job.file_size or 0
-                    with open(tmp_path, "wb") as f:
-                        if size_bytes > 0:
-                            f.seek(size_bytes - 1)
-                            f.write(b"\0")
+                    # Actually download the file via MTProto
+                    try:
+                        logger.info(
+                            f"Downloading file via MTProto: "
+                            f"chat_id={job.chat_id}, message_id={job.message_id}"
+                        )
+                        
+                        # Create progress callback for logging
+                        async def progress_callback(current: int, total: int):
+                            if total > 0:
+                                percent = (current / total) * 100
+                                logger.info(
+                                    f"Download progress: {current}/{total} "
+                                    f"bytes ({percent:.1f}%)"
+                                )
+                        
+                        # Download the actual file
+                        size_bytes = await self._mt.download_file_by_message(
+                            chat_id=job.chat_id,
+                            message_id=job.message_id,
+                            dest_path=tmp_path,
+                            on_progress=progress_callback
+                        )
+                        
+                        logger.info(
+                            f"Successfully downloaded {size_bytes} bytes to {tmp_path}"
+                        )
+                        
+                        # Verify file integrity
+                        actual_size = os.path.getsize(tmp_path)
+                        if actual_size != size_bytes:
+                            raise RuntimeError(
+                                f"File size mismatch: expected {size_bytes}, got {actual_size}"
+                            )
+                        
+                        if actual_size == 0:
+                            raise RuntimeError("Downloaded file is empty")
+                            
+                    except Exception as download_error:
+                        logger.error(f"MTProto download failed: {download_error}")
+                        # Clean up temp file
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                        raise RuntimeError(
+                            f"Failed to download file via MTProto: {download_error}"
+                        )
 
                 # Upload to S3 using existing key scheme (simplified for Phase 2)
                 year = dt.datetime.utcnow().strftime("%Y")

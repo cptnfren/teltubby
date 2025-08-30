@@ -241,3 +241,40 @@ ON CONFLICT(job_id) DO UPDATE SET state=excluded.state,
         self._conn.execute("DELETE FROM auth_secrets WHERE key=?", (key,))
         self._conn.commit()
 
+    def purge_all(self) -> dict[str, int]:
+        """Purge all data from the database and return counts of deleted records.
+        
+        This is a destructive operation that removes ALL data from the database.
+        Use with extreme caution and only for debugging/security purposes.
+        
+        Returns:
+        - dict[str, int]: Counts of deleted records by table
+        """
+        counts = {}
+        
+        # Count and delete from each table
+        tables = ['files', 'jobs', 'auth_secrets']
+        
+        for table in tables:
+            # Get count before deletion
+            cur = self._conn.execute(f"SELECT COUNT(*) FROM {table}")
+            count = cur.fetchone()[0]
+            
+            # Delete all records
+            self._conn.execute(f"DELETE FROM {table}")
+            
+            counts[table] = count
+        
+        # Commit all deletions
+        self._conn.commit()
+        
+        # Reset auto-increment counters if they exist
+        try:
+            self._conn.execute("DELETE FROM sqlite_sequence")
+            self._conn.commit()
+        except Exception:
+            # sqlite_sequence table might not exist, ignore
+            pass
+        
+        return counts
+

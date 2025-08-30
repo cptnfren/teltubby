@@ -62,3 +62,35 @@ class S3Client:
     def get_presigned_url(self, key: str, expires_seconds: int = 3600) -> str:
         return self._client.presigned_get_object(self._bucket, key, expires=expires_seconds)
 
+    def purge_bucket(self) -> int:
+        """Purge all objects in the bucket and return count of deleted objects.
+        
+        This is a destructive operation that removes ALL objects in the bucket.
+        Use with extreme caution and only for debugging/security purposes.
+        
+        Returns:
+        - int: Number of objects deleted
+        """
+        deleted_count = 0
+        
+        # List all objects in the bucket
+        objects = self._client.list_objects(self._bucket, recursive=True)
+        
+        # Delete objects in batches (MinIO/S3 allows up to 1000 per request)
+        batch = []
+        for obj in objects:
+            batch.append(DeleteObject(obj.object_name))
+            if len(batch) >= 1000:
+                # Delete batch
+                errors = self._client.remove_objects(self._bucket, batch)
+                # Count successful deletions (errors will be logged by MinIO)
+                deleted_count += len(batch) - len(list(errors))
+                batch = []
+        
+        # Delete remaining objects
+        if batch:
+            errors = self._client.remove_objects(self._bucket, batch)
+            deleted_count += len(batch) - len(list(errors))
+        
+        return deleted_count
+

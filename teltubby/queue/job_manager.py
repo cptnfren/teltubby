@@ -212,4 +212,44 @@ class JobManager:
         except Exception:
             return 0
 
+    async def purge_queue(self) -> int:
+        """Purge all messages from the main job queue and return count of purged messages.
+        
+        This is a destructive operation that removes ALL pending jobs from the queue.
+        Use with extreme caution and only for debugging/security purposes.
+        
+        Returns:
+        - int: Number of messages purged
+        """
+        if not self._channel:
+            raise RuntimeError("JobManager is not initialized")
+        
+        # Purge the main queue
+        q = await self._channel.declare_queue(
+            self._config.job_queue_name, durable=True, passive=True
+        )
+        
+        # Get message count before purging
+        try:
+            message_count = int(q.declaration_result.message_count)  # type: ignore[attr-defined]
+        except Exception:
+            message_count = 0
+        
+        # Purge all messages
+        await q.purge()
+        
+        # Also purge the dead letter queue
+        dlq = await self._channel.declare_queue(
+            self._config.job_dead_letter_queue, durable=True, passive=True
+        )
+        
+        try:
+            dlq_count = int(dlq.declaration_result.message_count)  # type: ignore[attr-defined]
+        except Exception:
+            dlq_count = 0
+        
+        await dlq.purge()
+        
+        return message_count + dlq_count
+
 
