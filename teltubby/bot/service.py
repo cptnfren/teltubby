@@ -57,16 +57,16 @@ class TeltubbyBotService:
         )
         self._app = builder.build()
 
-        # Commands
+        # Commands - must be added BEFORE message handlers
         self._app.add_handler(CommandHandler(["start", "help"], self._cmd_start))
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("quota", self._cmd_quota))
         self._app.add_handler(CommandHandler("mode", self._cmd_mode))
         self._app.add_handler(CommandHandler("db_maint", self._cmd_db_maint))
 
-        # Ingestion: any message with media in DMs
+        # Ingestion: only messages with media content in DMs
         self._app.add_handler(
-            MessageHandler(filters.ALL, self._on_message),
+            MessageHandler(filters.ALL & filters.ChatType.PRIVATE, self._on_message),
         )
 
         # Initialize support services
