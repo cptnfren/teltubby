@@ -63,7 +63,8 @@ class TeltubbyBotService:
         self._app = builder.build()
 
         # Commands - must be added BEFORE message handlers
-        self._app.add_handler(CommandHandler(["start", "help"], self._cmd_start))
+        self._app.add_handler(CommandHandler("start", self._cmd_start))
+        self._app.add_handler(CommandHandler("help", self._cmd_help))
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("quota", self._cmd_quota))
         self._app.add_handler(CommandHandler("mode", self._cmd_mode))
@@ -359,6 +360,98 @@ class TeltubbyBotService:
         text = TelemetryFormatter.format_start()
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
+    async def _cmd_help(self, update: Update, context: CallbackContext) -> None:
+        """Handle /help command with comprehensive command documentation."""
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+        
+        help_text = """🤖 **Teltubby Bot - Complete Command Reference**
+
+Welcome to Teltubby! This bot archives media files from Telegram conversations using both Bot API (≤50MB) and MTProto (≤2GB) for large files.
+
+## 📋 **Basic Commands**
+
+**`/start`** - Initialize the bot and show welcome message
+**`/help`** - Show this comprehensive help message
+**`/status`** - Show current bot status and system health
+**`/quota`** - Display current storage usage and quota information
+**`/mode`** - Show current operation mode (polling/webhook)
+
+## 🔐 **MTProto Authentication Commands**
+
+**`/mtcode <verification_code>`** - Submit Telegram verification code for MTProto authentication
+**`/mtpass <password>`** - Submit 2FA password if your account has two-factor authentication enabled
+**`/mtstatus`** - Check current MTProto worker status and authentication state
+
+*Note: These commands are required to process files larger than 50MB via MTProto.*
+
+## 📊 **Queue & Job Management Commands**
+
+**`/queue`** - List recent jobs in the processing queue
+**`/jobs <job_id>`** - Show detailed information for a specific job
+**`/retry <job_id>`** - Retry a failed or cancelled job
+**`/cancel <job_id>`** - Mark a job as cancelled (advisory only)
+
+## 🛠️ **System Maintenance Commands**
+
+**`/db_maint`** - Perform database maintenance (VACUUM operation)
+
+## 📁 **How to Use**
+
+### **For Regular Media Files (≤50MB):**
+1. Simply send any media file (photo, video, document, etc.) to this bot
+2. The bot will automatically process and archive it
+3. You'll receive a confirmation message with storage details
+
+### **For Large Files (>50MB):**
+1. Send the large file to the bot
+2. The bot will queue it for MTProto processing
+3. You'll receive a "Queued for MTProto processing" message
+4. If authentication is needed, use `/mtcode <code>` when prompted
+5. Monitor progress with `/mtstatus`
+
+### **Authentication Setup:**
+1. When you first send a large file, the MTProto worker may need authentication
+2. Telegram will send a verification code to your account
+3. Use `/mtcode <code>` to submit the verification code
+4. If you have 2FA enabled, also use `/mtpass <password>`
+5. Check authentication status with `/mtstatus`
+
+## 🔍 **Status Monitoring**
+
+- **`/status`** - Overall system health and configuration
+- **`/mtstatus`** - MTProto worker status and authentication state
+- **`/quota`** - Storage usage and quota information
+- **`/queue`** - Current job queue status
+
+## 📝 **Examples**
+
+```
+/mtcode 123456          # Submit verification code
+/mtpass mypassword      # Submit 2FA password
+/mtstatus               # Check worker status
+/jobs abc-123-def       # View job details
+/retry abc-123-def      # Retry failed job
+```
+
+## 🆘 **Troubleshooting**
+
+- **Worker not processing large files?** Use `/mtstatus` to check authentication
+- **Need to re-authenticate?** Use `/mtcode` with the new verification code
+- **Jobs failing?** Check `/queue` and use `/retry` for failed jobs
+- **Storage full?** Check `/quota` for current usage
+
+## 📞 **Support**
+
+All commands are restricted to whitelisted users only. If you encounter issues, check the status commands first, then contact your system administrator.
+
+---
+*Teltubby - Professional Telegram Media Archival System*"""
+        
+        await update.effective_message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
     async def _cmd_mtcode(self, update: Update, context: CallbackContext) -> None:
         """Store MTProto login code sent by Telegram to the user account.
 
@@ -488,7 +581,8 @@ class TeltubbyBotService:
             response += "**Commands:**\n"
             response += "• `/mtcode <code>` - Submit verification code\n"
             response += "• `/mtpass <password>` - Submit 2FA password\n"
-            response += "• `/mtstatus` - Check this status again"
+            response += "• `/mtstatus` - Check this status again\n"
+            response += "• `/help` - View complete command reference"
             
             await update.effective_message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
             

@@ -76,7 +76,7 @@ async def health_check() -> Dict[str, Any]:
             
             # Check queue status
             queue = await channel.declare_queue(config.job_queue_name, passive=True)
-            queue_info = await queue.declare(passive=True)
+            queue_info = await queue.declare()
             
             health_status["rabbitmq"] = {
                 "status": "healthy",
@@ -96,11 +96,11 @@ async def health_check() -> Dict[str, Any]:
             health_status["rabbitmq"] = {"status": "unhealthy", "error": str(e)}
             health_status["status"] = "degraded"
         
-        # Check MTProto worker status
+        # Check MTProto worker status (optional - Docker may not be available in container)
         try:
             health_status["mtproto_worker"] = await get_mtproto_worker_status()
         except Exception as e:
-            health_status["mtproto_worker"] = {"status": "unknown", "error": str(e)}
+            health_status["mtproto_worker"] = {"status": "unknown", "error": "Docker commands not available in container"}
         
         return health_status
         
