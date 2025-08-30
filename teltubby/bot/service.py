@@ -12,7 +12,7 @@ import logging
 from typing import Optional
 
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -23,6 +23,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram import ChatAction
 from ..runtime.config import AppConfig
 from ..storage.s3_client import S3Client
 from ..db.dedup import DedupIndex
@@ -109,6 +110,15 @@ class TeltubbyBotService:
             async def __aenter__(self):
                 """Start typing indicator."""
                 if self.bot:
+                    # Send an immediate typing action so the user sees it right away
+                    try:
+                        await self.bot.send_chat_action(
+                            chat_id=self.chat_id,
+                            action=ChatAction.TYPING,
+                        )
+                    except Exception:
+                        pass
+                    # Keep typing alive while processing
                     self._typing_task = asyncio.create_task(self._keep_typing())
                 return self
             
@@ -127,7 +137,7 @@ class TeltubbyBotService:
                     while True:
                         await self.bot.send_chat_action(
                             chat_id=self.chat_id, 
-                            action="typing"
+                            action=ChatAction.TYPING
                         )
                         await asyncio.sleep(4)  # Telegram typing expires after ~5 seconds
                 except asyncio.CancelledError:
@@ -335,7 +345,7 @@ class TeltubbyBotService:
             return
         
         # Show typing indicator while checking status
-        await update.effective_chat.send_action("typing")
+        await update.effective_chat.send_action(ChatAction.TYPING)
         
         used_ratio = self._quota.used_ratio() if self._quota else None
         text = TelemetryFormatter.format_status(self._config.telegram_mode, used_ratio)
@@ -350,7 +360,7 @@ class TeltubbyBotService:
             return
         
         # Show typing indicator while calculating quota
-        await update.effective_chat.send_action("typing")
+        await update.effective_chat.send_action(ChatAction.TYPING)
         
         used_ratio = self._quota.used_ratio()
         if used_ratio is None:
