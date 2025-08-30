@@ -9,3 +9,9 @@ uvloop==0.19.0
 aiodns==3.2.0
 orjson==3.10.7
 
+# RabbitMQ client for async job queue
+aio-pika==9.4.3
+
+# MTProto client library
+Telethon==1.35.0
+

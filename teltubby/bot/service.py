@@ -31,6 +31,7 @@ from ..ingest.album_aggregator import AlbumAggregator
 from ..ingest.pipeline import process_batch
 from ..quota.quota import QuotaManager
 from ..utils.telemetry_formatter import TelemetryFormatter, TelemetryData
+from ..queue.job_manager import JobManager
 
 
 logger = logging.getLogger("teltubby.bot")
@@ -51,6 +52,7 @@ class TeltubbyBotService:
         )
         self._quota: Optional[QuotaManager] = None
         self._finalizer_task: Optional[asyncio.Task] = None
+        self._jobs: Optional[JobManager] = None
 
     async def start(self) -> None:
         builder = (
@@ -66,6 +68,14 @@ class TeltubbyBotService:
         self._app.add_handler(CommandHandler("quota", self._cmd_quota))
         self._app.add_handler(CommandHandler("mode", self._cmd_mode))
         self._app.add_handler(CommandHandler("db_maint", self._cmd_db_maint))
+        # MTProto interactive auth
+        self._app.add_handler(CommandHandler("mtcode", self._cmd_mtcode))
+        self._app.add_handler(CommandHandler("mtpass", self._cmd_mtpass))
+        # Queue/Job management commands (admin-only: enforced by whitelist)
+        self._app.add_handler(CommandHandler("queue", self._cmd_queue))
+        self._app.add_handler(CommandHandler("jobs", self._cmd_jobs))
+        self._app.add_handler(CommandHandler("retry", self._cmd_retry))
+        self._app.add_handler(CommandHandler("cancel", self._cmd_cancel))
 
         # Ingestion: only messages with media content in DMs
         self._app.add_handler(
@@ -76,6 +86,9 @@ class TeltubbyBotService:
         self._s3 = S3Client(self._config)
         self._dedup = DedupIndex(self._config)
         self._quota = QuotaManager(self._config, self._s3)
+        # Initialize RabbitMQ job manager
+        self._jobs = JobManager(self._config)
+        await self._jobs.initialize()
 
         # Lifecycle per PTB v21
         await self._app.initialize()
@@ -170,6 +183,12 @@ class TeltubbyBotService:
             pass
         try:
             await self._app.shutdown()
+        except Exception:
+            pass
+        # Close job manager last
+        try:
+            if self._jobs:
+                await self._jobs.close()
         except Exception:
             pass
 
@@ -338,6 +357,46 @@ class TeltubbyBotService:
         text = TelemetryFormatter.format_start()
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
+    async def _cmd_mtcode(self, update: Update, context: CallbackContext) -> None:
+        """Store MTProto login code sent by Telegram to the user account.
+
+        Usage: /mtcode 12345
+        """
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+        if not self._dedup:
+            return
+        args = context.args if hasattr(context, "args") else []
+        if not args:
+            await update.effective_message.reply_text("Usage: /mtcode <code>")
+            return
+        code = args[0].strip()
+        now_iso = __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
+        self._dedup.set_secret("mt_code", code, now_iso)
+        await update.effective_message.reply_text("MTProto code stored.")
+
+    async def _cmd_mtpass(self, update: Update, context: CallbackContext) -> None:
+        """Store MTProto 2FA password for the user account.
+
+        Usage: /mtpass <password>
+        """
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+        if not self._dedup:
+            return
+        args = context.args if hasattr(context, "args") else []
+        if not args:
+            await update.effective_message.reply_text("Usage: /mtpass <password>")
+            return
+        pwd = args[0]
+        now_iso = __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
+        self._dedup.set_secret("mt_password", pwd, now_iso)
+        await update.effective_message.reply_text("MTProto password stored.")
+
     async def _cmd_status(self, update: Update, context: CallbackContext) -> None:
         if not _is_whitelisted(
             update.effective_user and update.effective_user.id, self._config
@@ -348,7 +407,15 @@ class TeltubbyBotService:
         await update.effective_chat.send_action(ChatAction.TYPING)
         
         used_ratio = self._quota.used_ratio() if self._quota else None
+        queue_depth = None
+        try:
+            if self._jobs:
+                queue_depth = await self._jobs.get_queue_depth()
+        except Exception:
+            queue_depth = None
         text = TelemetryFormatter.format_status(self._config.telegram_mode, used_ratio)
+        if queue_depth is not None:
+            text = f"{text}\nQueue depth: {queue_depth}"
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     async def _cmd_quota(self, update: Update, context: CallbackContext) -> None:
@@ -388,6 +455,111 @@ class TeltubbyBotService:
             self._dedup.vacuum()
         text = TelemetryFormatter.format_db_maint()
         await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_queue(self, update: Update, context: CallbackContext) -> None:
+        """List recent jobs from the queue store.
+
+        Variables:
+        - update: Update - Telegram update object
+        - context: CallbackContext - PTB context (unused)
+        """
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+        if not self._dedup:
+            return
+        rows = self._dedup.list_jobs(limit=20)
+        if not rows:
+            await update.effective_message.reply_text("Queue is empty.")
+            return
+        lines = ["Recent jobs:"]
+        for (job_id, user_id, chat_id, message_id, state, priority, created_at, updated_at, last_error) in rows:
+            err = f" err={last_error[:60]}..." if last_error else ""
+            lines.append(f"- {job_id} [{state}] prio={priority} msg={message_id} updated={updated_at}{err}")
+        await update.effective_message.reply_text("\n".join(lines))
+
+    async def _cmd_jobs(self, update: Update, context: CallbackContext) -> None:
+        """Show details for a specific job id."""
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+        if not self._dedup:
+            return
+        args = context.args if hasattr(context, "args") else []
+        if not args:
+            await update.effective_message.reply_text("Usage: /jobs <job_id>")
+            return
+        job_id = args[0]
+        row = self._dedup.get_job(job_id)
+        if not row:
+            await update.effective_message.reply_text("Job not found.")
+            return
+        (job_id, user_id, chat_id, message_id, state, priority, created_at, updated_at, last_error, payload_json) = row
+        text = (
+            f"Job {job_id}\n"
+            f"state={state} priority={priority}\n"
+            f"chat_id={chat_id} message_id={message_id}\n"
+            f"created={created_at} updated={updated_at}\n"
+            f"last_error={last_error or '-'}\n"
+        )
+        await update.effective_message.reply_text(text)
+
+    async def _cmd_retry(self, update: Update, context: CallbackContext) -> None:
+        """Retry a failed or cancelled job by re-publishing its payload."""
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+        if not (self._dedup and self._jobs):
+            return
+        args = context.args if hasattr(context, "args") else []
+        if not args:
+            await update.effective_message.reply_text("Usage: /retry <job_id>")
+            return
+        job_id = args[0]
+        row = self._dedup.get_job(job_id)
+        if not row:
+            await update.effective_message.reply_text("Job not found.")
+            return
+        (job_id, user_id, chat_id, message_id, state, priority, created_at, updated_at, last_error, payload_json) = row
+        if state not in ("FAILED", "CANCELLED"):
+            await update.effective_message.reply_text(f"Job {job_id} is {state}, cannot retry.")
+            return
+        try:
+            import json as _json
+            payload = _json.loads(payload_json) if payload_json else None
+            if not payload:
+                await update.effective_message.reply_text("No payload stored; cannot retry.")
+                return
+            await self._jobs.publish_job(payload)
+            now_iso = __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
+            self._dedup.update_job_state(job_id, "PENDING", None, now_iso)
+            await update.effective_message.reply_text(f"Re-queued job {job_id}.")
+        except Exception as e:
+            await update.effective_message.reply_text(f"Retry failed: {e}")
+
+    async def _cmd_cancel(self, update: Update, context: CallbackContext) -> None:
+        """Mark a job as cancelled.
+
+        Note: This does not remove an already-queued AMQP message; cancellation
+        is advisory and respected by the worker.
+        """
+        if not _is_whitelisted(
+            update.effective_user and update.effective_user.id, self._config
+        ):
+            return
+        if not self._dedup:
+            return
+        args = context.args if hasattr(context, "args") else []
+        if not args:
+            await update.effective_message.reply_text("Usage: /cancel <job_id>")
+            return
+        job_id = args[0]
+        now_iso = __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
+        self._dedup.update_job_state(job_id, "CANCELLED", None, now_iso)
+        await update.effective_message.reply_text(f"Cancelled job {job_id}.")
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Enforce DM-only and whitelist; ignore silently otherwise
@@ -459,10 +631,155 @@ class TeltubbyBotService:
 
                 logger.info(f"Starting batch processing for {len(items)} items")
                 
-                # Process batch
-                res = await process_batch(
-                    self._config, self._s3, self._dedup, self._app.bot, items
-                )
+                # Route over-bot-limit items to MTProto via queue before processing others
+                to_process = []
+                queued_jobs = []
+                bot_limit = self._config.bot_api_max_file_size_bytes or (50 * 1024 * 1024)
+
+                async def _extract_file_info(m):
+                    """Extract minimal file info for routing and job creation.
+                    Variables:
+                    - m: telegram.Message - input message
+                    Returns dict with keys: file_id:str, file_unique_id:str, file_size:int|None,
+                    file_type:str, file_name:str|None, mime_type:str|None
+                    """
+                    if m.photo:
+                        ph = max(m.photo or [], key=lambda p: (p.width or 0) * (p.height or 0))
+                        return {
+                            "file_id": ph.file_id,
+                            "file_unique_id": ph.file_unique_id,
+                            "file_size": ph.file_size,
+                            "file_type": "photo",
+                            "file_name": None,
+                            "mime_type": "image/jpeg",
+                        }
+                    if m.document:
+                        return {
+                            "file_id": m.document.file_id,
+                            "file_unique_id": m.document.file_unique_id,
+                            "file_size": m.document.file_size,
+                            "file_type": "document",
+                            "file_name": m.document.file_name,
+                            "mime_type": m.document.mime_type,
+                        }
+                    if m.video:
+                        return {
+                            "file_id": m.video.file_id,
+                            "file_unique_id": m.video.file_unique_id,
+                            "file_size": m.video.file_size,
+                            "file_type": "video",
+                            "file_name": m.video.file_name,
+                            "mime_type": m.video.mime_type,
+                        }
+                    if m.audio:
+                        return {
+                            "file_id": m.audio.file_id,
+                            "file_unique_id": m.audio.file_unique_id,
+                            "file_size": m.audio.file_size,
+                            "file_type": "audio",
+                            "file_name": m.audio.file_name,
+                            "mime_type": m.audio.mime_type,
+                        }
+                    if m.voice:
+                        return {
+                            "file_id": m.voice.file_id,
+                            "file_unique_id": m.voice.file_unique_id,
+                            "file_size": m.voice.file_size,
+                            "file_type": "voice",
+                            "file_name": None,
+                            "mime_type": m.voice.mime_type,
+                        }
+                    if m.animation:
+                        return {
+                            "file_id": m.animation.file_id,
+                            "file_unique_id": m.animation.file_unique_id,
+                            "file_size": m.animation.file_size,
+                            "file_type": "animation",
+                            "file_name": m.animation.file_name,
+                            "mime_type": m.animation.mime_type,
+                        }
+                    if m.sticker:
+                        return {
+                            "file_id": m.sticker.file_id,
+                            "file_unique_id": m.sticker.file_unique_id,
+                            "file_size": m.sticker.file_size,
+                            "file_type": "sticker",
+                            "file_name": None,
+                            "mime_type": None,
+                        }
+                    if m.video_note:
+                        return {
+                            "file_id": m.video_note.file_id,
+                            "file_unique_id": m.video_note.file_unique_id,
+                            "file_size": m.video_note.file_size,
+                            "file_type": "video_note",
+                            "file_name": None,
+                            "mime_type": None,
+                        }
+                    return None
+
+                import datetime as _dt, json as _json, time as _time
+                assert self._jobs and self._dedup
+
+                for m in items:
+                    finfo = await _extract_file_info(m)
+                    if not finfo or finfo.get("file_id") is None:
+                        to_process.append(m)
+                        continue
+                    size_hint = finfo.get("file_size") or 0
+                    if size_hint and size_hint > bot_limit:
+                        # Create and publish a job
+                        job_id = self._jobs.new_job_id()
+                        created_at = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                        payload = {
+                            "job_id": job_id,
+                            "user_id": update.effective_user.id if update.effective_user else 0,
+                            "chat_id": m.chat.id,
+                            "message_id": m.id,
+                            "file_info": {
+                                "file_id": finfo["file_id"],
+                                "file_unique_id": finfo["file_unique_id"],
+                                "file_size": size_hint,
+                                "file_type": finfo["file_type"],
+                                "file_name": finfo.get("file_name"),
+                                "mime_type": finfo.get("mime_type"),
+                            },
+                            "telegram_context": {
+                                "forward_origin": m.forward_origin.to_dict() if m.forward_origin else None,  # type: ignore[attr-defined]
+                                "caption": m.caption or None,
+                                "entities": [e.to_dict() for e in (m.entities or [])],
+                                "media_group_id": m.media_group_id,
+                            },
+                            "job_metadata": {
+                                "created_at": created_at,
+                                "priority": "normal",
+                                "retry_count": 0,
+                                "max_retries": 3,
+                            },
+                        }
+                        await self._jobs.publish_job(payload)
+                        self._dedup.upsert_job(job_id, payload["user_id"], payload["chat_id"], payload["message_id"], "PENDING", 4, created_at, _json.dumps(payload))
+                        queued_jobs.append(job_id)
+                    else:
+                        to_process.append(m)
+
+                # Acknowledge queued jobs to the user
+                if queued_jobs:
+                    lines = ["Queued for MTProto processing:"] + [f"- {jid}" for jid in queued_jobs]
+                    await message.reply_text("\n".join(lines))
+
+                # Process remaining items via Bot API
+                if to_process:
+                    res = await process_batch(
+                        self._config, self._s3, self._dedup, self._app.bot, to_process
+                    )
+                else:
+                    # Nothing to process via Bot API
+                    class _Dummy:
+                        outcomes = []
+                        base_path = ""
+                        total_bytes_uploaded = 0
+                    res = _Dummy()
                 
                 logger.info(f"Batch processing completed successfully")
                 

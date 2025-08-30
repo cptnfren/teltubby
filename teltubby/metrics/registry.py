@@ -29,3 +29,16 @@ PROCESSING_SECONDS = Histogram(
     "teltubby_processing_seconds", "Processing time per message"
 )
 
+# Phase 3: Job queue metrics
+JOBS_CREATED = Counter(
+    "teltubby_jobs_created_total", "Jobs created and enqueued for MTProto"
+)
+JOBS_COMPLETED = Counter(
+    "teltubby_jobs_completed_total", "Jobs completed successfully by worker"
+)
+JOBS_FAILED = Counter(
+    "teltubby_jobs_failed_total", "Jobs failed in worker"
+)
+JOBS_RETRIED = Counter(
+    "teltubby_jobs_retried_total", "Jobs retried by admin or policy"
+)

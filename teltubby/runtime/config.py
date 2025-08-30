@@ -76,6 +76,26 @@ class AppConfig:
     health_port: int
     bind_health_localhost_only: bool
 
+    # RabbitMQ / Queue
+    rabbitmq_host: str
+    rabbitmq_port: int
+    rabbitmq_username: str
+    rabbitmq_password: str
+    rabbitmq_vhost: str
+    job_queue_name: str
+    job_dead_letter_queue: str
+    job_exchange: str
+    job_dlx_exchange: str
+
+    # MTProto / Worker
+    mtproto_api_id: int | None
+    mtproto_api_hash: str | None
+    mtproto_phone_number: str | None
+    mtproto_session_path: str | None
+    worker_concurrency: int
+    worker_max_retries: int
+    worker_retry_delay_seconds: int
+
     @staticmethod
     def from_env() -> "AppConfig":
         whitelist_raw = os.getenv("TELEGRAM_WHITELIST_IDS", "").strip()
@@ -99,7 +119,9 @@ class AppConfig:
                 "ALBUM_AGGREGATION_WINDOW_SECONDS", 10
             ),
             max_file_gb=_get_int("MAX_FILE_GB", 4),
-            bot_api_max_file_size_bytes=_get_int("BOT_API_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024),
+            bot_api_max_file_size_bytes=_get_int(
+                "BOT_API_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024
+            ),
             sqlite_path=os.getenv("SQLITE_PATH", "/data/teltubby.db"),
             dedup_enable=_get_bool("DEDUP_ENABLE", True),
             concurrency=max(1, min(_get_int("CONCURRENCY", 8), 32)),
@@ -114,5 +136,31 @@ class AppConfig:
             log_rotate_backup_count=_get_int("LOG_ROTATE_BACKUP_COUNT", 10),
             health_port=_get_int("HEALTH_PORT", 8081),
             bind_health_localhost_only=_get_bool("BIND_HEALTH_LOCALHOST_ONLY", True),
+            # RabbitMQ / Queue
+            rabbitmq_host=os.getenv("RABBITMQ_HOST", "rabbitmq"),
+            rabbitmq_port=_get_int("RABBITMQ_PORT", 5672),
+            rabbitmq_username=os.getenv("RABBITMQ_USERNAME", "guest"),
+            rabbitmq_password=os.getenv("RABBITMQ_PASSWORD", "guest"),
+            rabbitmq_vhost=os.getenv("RABBITMQ_VHOST", "/"),
+            job_queue_name=os.getenv(
+                "JOB_QUEUE_NAME", "teltubby.large_files"
+            ),
+            job_dead_letter_queue=os.getenv(
+                "JOB_DEAD_LETTER_QUEUE", "teltubby.failed_jobs"
+            ),
+            job_exchange=os.getenv(
+                "JOB_EXCHANGE", "teltubby.exchange"
+            ),
+            job_dlx_exchange=os.getenv(
+                "JOB_DLX_EXCHANGE", "teltubby.dlx"
+            ),
+            # MTProto / Worker
+            mtproto_api_id=int(os.getenv("MTPROTO_API_ID", "0") or 0) or None,
+            mtproto_api_hash=os.getenv("MTPROTO_API_HASH"),
+            mtproto_phone_number=os.getenv("MTPROTO_PHONE_NUMBER"),
+            mtproto_session_path=os.getenv("MTPROTO_SESSION_PATH", "/data/mtproto.session"),
+            worker_concurrency=_get_int("WORKER_CONCURRENCY", 1),
+            worker_max_retries=_get_int("WORKER_MAX_RETRIES", 3),
+            worker_retry_delay_seconds=_get_int("WORKER_RETRY_DELAY_SECONDS", 60),
         )
 

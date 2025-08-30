@@ -15,7 +15,7 @@ This guide walks you through creating a Telegram Bot with BotFather, collecting 
 3. BotFather will return a bot token. Copy and store the token securely. Treat it like a password.
 
 Optional (recommended hardening & polish):
-- `/setdescription` → Short description, e.g.: "DM archival bot for forwarded/copied messages to MinIO with dedup."
+- `/setdescription` → Short description, e.g.: "DM archival bot for forwarded/copied messages to MinIO with dedup and rich telemetry."
 - `/setabouttext` → A short about text for profiles.
 - `/setuserpic` → Set an avatar.
 - `/setcommands` → Paste the command list below to improve UX.
@@ -28,6 +28,12 @@ status - Show current mode and MinIO usage
 quota - Show bucket used percent
 db_maint - Run maintenance (VACUUM)
 mode - Show current ingestion mode
+queue - Show recent jobs
+jobs - Show job details
+retry - Retry failed job
+cancel - Cancel pending job
+mtcode - Submit MTProto login code
+mtpass - Submit MTProto 2FA password
 ```
 
 Security notes:
@@ -46,6 +52,7 @@ Use the provided PowerShell wrapper to keep all configuration in a single file.
 ```powershell
 cd D:\DevZone\teltubby
 ```
+
 2. Run the helper once to generate an editable env file:
 ```powershell
 ./run.ps1 -Action status
@@ -62,8 +69,10 @@ $env:S3_SECRET_ACCESS_KEY = "<minio_secret_key>"
 $env:S3_BUCKET = "archives"                          # must exist in MinIO
 $env:S3_FORCE_PATH_STYLE = "true"
 $env:MINIO_TLS_SKIP_VERIFY = "true"                  # only for self-signed dev
+
 # Optional tuning for tests:
-# $env:BOT_API_MAX_FILE_SIZE_BYTES = "1048576"       # force 1MB skip-path tests
+# $env:ALBUM_AGGREGATION_WINDOW_SECONDS = "5"        # increase from default 2s
+# $env:MAX_FILE_GB = "1"                             # force smaller file limit tests
 # $env:S3_BUCKET_QUOTA_BYTES = "10485760"            # force 10MB quota pause tests
 ```
 
@@ -72,39 +81,68 @@ $env:MINIO_TLS_SKIP_VERIFY = "true"                  # only for self-signed dev
 ```powershell
 ./run.ps1 -Action up
 ```
+
 2. Verify health & metrics:
    - Health: `http://127.0.0.1:8081/healthz` → expect `{ "status": "ok" }`
    - Metrics: `http://127.0.0.1:8081/metrics`
 
 ### 5) Verify bot behavior in Telegram (DM-only)
 - From a whitelisted account, DM your bot:
-  - `/start` → basic help
-  - `/status` → shows mode and MinIO used%
-  - `/quota` → shows used% (if `S3_BUCKET_QUOTA_BYTES` configured)
+  - `/start` → basic help with emoji formatting
+  - `/status` → shows mode and MinIO used% with visual indicators
+  - `/quota` → shows used% with status emojis (if `S3_BUCKET_QUOTA_BYTES` configured)
   - `/db_maint` → runs SQLite VACUUM
 - Forward or copy a message with media to the bot:
-  - Expect an ack summarizing files, media types, base S3 prefix, bytes uploaded, dedup, and skipped.
+  - Expect rich formatted ack with emojis summarizing files, media types, base S3 prefix, bytes uploaded, dedup, and skipped items.
   - Confirm objects and `message.json` in MinIO under `teltubby/{YYYY}/{MM}/{chat_slug}/{message_id}/`.
+  - **Enhanced UX**: Real-time typing indicators during processing
+  - **Large Files (>50MB)**: You will receive a job ID queued for MTProto. Use `/queue` and `/jobs <id>` for status.
 
-### 6) Webhook mode (optional, prod-like)
+### 6) Test album handling
+- Send multiple media items as an album to test the 2-second aggregation window
+- Verify all items are processed together and stored in the same folder
+- Check that validation prevents partial album failures
+
+### 7) Webhook mode (optional, prod-like)
 1. Set these in `env.local.ps1`:
 ```powershell
 $env:TELEGRAM_MODE = "webhook"
 $env:WEBHOOK_URL = "https://your-domain.example/bot"
 # Optionally set: $env:WEBHOOK_SECRET = "<random_string>"
 ```
+
 2. Expose container port 8080 behind a TLS reverse proxy (e.g., Nginx Proxy Manager), mapping to your `WEBHOOK_URL`.
 3. Restart:
 ```powershell
 ./run.ps1 -Action restart
 ```
+
 4. Re-verify by sending commands/media as above.
 
+### 8) Test quota monitoring (if configured)
+1. Set a small quota for testing:
+```powershell
+$env:S3_BUCKET_QUOTA_BYTES = "10485760"  # 10MB
+```
+
+2. Upload files until quota is reached
+3. Verify ingestion pauses at 100% with clear pause message
+4. Check `/quota` command shows appropriate status
+
 ### Troubleshooting
-- 401/Unauthorized in logs: invalid `TELEGRAM_BOT_TOKEN`.
-- No replies: ensure you are DM-ing (not a group) and your user ID is in `TELEGRAM_WHITELIST_IDS`.
-- Webhook 409/SSL errors: verify `WEBHOOK_URL` is reachable over HTTPS and the reverse proxy forwards to container `8080`.
-- MinIO errors: verify bucket exists and credentials/endpoint are correct; set `S3_FORCE_PATH_STYLE=true` for MinIO.
+- **401/Unauthorized in logs**: invalid `TELEGRAM_BOT_TOKEN`.
+- **No replies**: ensure you are DM-ing (not a group) and your user ID is in `TELEGRAM_WHITELIST_IDS`.
+- **Webhook 409/SSL errors**: verify `WEBHOOK_URL` is reachable over HTTPS and the reverse proxy forwards to container `8080`.
+- **MTProto login (worker)**: Telegram sends a login code to your user. Provide it via `/mtcode 12345`. If 2FA is set, also send `/mtpass your_password`. The worker polls these values and continues automatically. Flood-wait delays may apply.
+- **MinIO errors**: verify bucket exists and credentials/endpoint are correct; set `S3_FORCE_PATH_STYLE=true` for MinIO.
+- **Album processing issues**: check `ALBUM_AGGREGATION_WINDOW_SECONDS` setting and ensure all items arrive within the window.
+
+### Key Features to Test
+- **Rich telemetry**: Verify ack messages include emojis and detailed status
+- **Typing indicators**: Confirm real-time feedback during processing
+- **Album handling**: Test media group aggregation and validation
+- **Error handling**: Try oversized files to see skip behavior
+- **Quota management**: Test pause at 100% if quota configured
 
 ### Appendix: BotFather quick reference
 - `/newbot`, `/token` or `/revoke` to rotate secrets

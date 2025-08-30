@@ -41,6 +41,39 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at);
 CREATE INDEX IF NOT EXISTS idx_tg_map_sha256 ON tg_map(sha256);
 CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(media_group_id);
+-- Jobs for MTProto large-file processing
+CREATE TABLE IF NOT EXISTS jobs (
+  job_id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 4,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_error TEXT,
+  payload_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS job_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  success INTEGER,
+  error TEXT,
+  FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+CREATE INDEX IF NOT EXISTS idx_job_attempts_job ON job_attempts(job_id);
+-- Auth secrets for MTProto interactive login
+CREATE TABLE IF NOT EXISTS auth_secrets (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 """
 
 
@@ -102,5 +135,109 @@ class DedupIndex:
 
     def vacuum(self) -> None:
         self._conn.execute("VACUUM")
+        self._conn.commit()
+
+    # --- Job store helpers (minimal for Phase 1) ---
+
+    def upsert_job(self, job_id: str, user_id: int, chat_id: int, message_id: int, state: str, priority: int, now_iso: str, payload_json: Optional[str] = None) -> None:
+        """Insert or update a job row.
+
+        Parameters:
+        - job_id: str - unique job identifier (UUIDv4)
+        - user_id: int - Telegram user id
+        - chat_id: int - Telegram chat id
+        - message_id: int - Telegram message id
+        - state: str - job state (PENDING|PROCESSING|COMPLETED|FAILED|RETRYING|CANCELLED)
+        - priority: int - priority 0..9
+        - now_iso: str - ISO8601 UTC timestamp used for created/updated
+        """
+        self._conn.execute(
+            """
+INSERT INTO jobs(job_id, user_id, chat_id, message_id, state, priority,
+                 created_at, updated_at, payload_json)
+VALUES(?,?,?,?,?,?,?,?,?)
+ON CONFLICT(job_id) DO UPDATE SET state=excluded.state,
+  priority=excluded.priority,
+  updated_at=excluded.updated_at,
+  payload_json=COALESCE(excluded.payload_json, jobs.payload_json)
+""",
+            (
+                job_id,
+                user_id,
+                chat_id,
+                message_id,
+                state,
+                int(priority),
+                now_iso,
+                now_iso,
+                payload_json,
+            ),
+        )
+        self._conn.commit()
+
+    def update_job_state(self, job_id: str, state: str, last_error: Optional[str], now_iso: str) -> None:
+        """Update the job state and optional last_error.
+
+        Parameters:
+        - job_id: str - job identifier
+        - state: str - new state
+        - last_error: Optional[str] - error text if failed
+        - now_iso: str - ISO8601 UTC timestamp for updated_at
+        """
+        self._conn.execute(
+            "UPDATE jobs SET state=?, last_error=?, updated_at=? WHERE job_id=?",
+            (state, last_error, now_iso, job_id),
+        )
+        self._conn.commit()
+
+    def get_job(self, job_id: str) -> Optional[Tuple[str, int, int, int, str, int, str, str, Optional[str], Optional[str]]]:
+        """Fetch a job row by id.
+
+        Returns a tuple with columns corresponding to the `jobs` table.
+        """
+        cur = self._conn.execute(
+            "SELECT job_id, user_id, chat_id, message_id, state, priority, created_at, updated_at, last_error, payload_json FROM jobs WHERE job_id=?",
+            (job_id,),
+        )
+        return cur.fetchone()
+
+    def list_jobs(self, limit: int = 20) -> list[Tuple[str, int, int, int, str, int, str, str, Optional[str]]]:
+        """List recent jobs ordered by updated_at descending."""
+        cur = self._conn.execute(
+            "SELECT job_id, user_id, chat_id, message_id, state, priority, created_at, updated_at, last_error FROM jobs ORDER BY updated_at DESC LIMIT ?",
+            (int(limit),),
+        )
+        return cur.fetchall()
+
+    # --- Auth secrets (MTProto code/password exchange) ---
+
+    def set_secret(self, key: str, value: str, now_iso: str) -> None:
+        """Store or replace a secret value (e.g., mt_code, mt_password).
+
+        Parameters:
+        - key: str - secret key name
+        - value: str - secret value
+        - now_iso: str - timestamp in ISO8601 UTC
+        """
+        self._conn.execute(
+            "REPLACE INTO auth_secrets(key, value, created_at) VALUES(?,?,?)",
+            (key, value, now_iso),
+        )
+        self._conn.commit()
+
+    def get_secret_since(self, key: str, since_iso: str) -> Optional[Tuple[str, str]]:
+        """Return (value, created_at) if secret exists and is newer than since_iso."""
+        cur = self._conn.execute(
+            "SELECT value, created_at FROM auth_secrets WHERE key=? AND created_at>=?",
+            (key, since_iso),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return row[0], row[1]
+
+    def delete_secret(self, key: str) -> None:
+        """Delete a secret entry by key."""
+        self._conn.execute("DELETE FROM auth_secrets WHERE key=?", (key,))
         self._conn.commit()
 

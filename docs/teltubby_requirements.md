@@ -1,15 +1,15 @@
 
 # **teltubby** — Telegram Media Archiver (MVP)  
 **Requirements Specification**  
-**Version:** 1.0  
-**Date:** 2025-08-29 03:21:06Z  
+**Version:** 1.1 (Updated to match implementation)  
+**Date:** 2025-01-27  
 **Owner:** Jeremy / Crux Experts LLC
 
 ---
 
 ## 0) Purpose & Scope
 
-**teltubby** is a Telegram **archival** bot that ingests **forwarded or copied** messages sent via **DM** by **whitelisted curators** and stores the message context, captions, and **all media** into a **MinIO (S3-compatible)** bucket with deterministic, human/machine-friendly filenames and structured JSON metadata. The bot enforces **deduplication** (no duplicate objects in storage), returns **formatted telemetry** acks to the curator, and monitors **bucket quota** to pause ingestion at 100% utilization.
+**teltubby** is a Telegram **archival** bot that ingests **forwarded or copied** messages sent via **DM** by **whitelisted curators** and stores the message context, captions, and **all media** into a **MinIO (S3-compatible)** bucket with deterministic, human/machine-friendly filenames and structured JSON metadata. The bot enforces **deduplication** (no duplicate objects in storage), returns **rich formatted telemetry** acks to the curator, and monitors **bucket quota** to pause ingestion at 100% utilization.
 
 Non-goal: content processing (OCR/transcription/summarization). MVP is strictly archival.
 
@@ -20,9 +20,9 @@ Non-goal: content processing (OCR/transcription/summarization). MVP is strictly 
 1. **100% faithful capture** of forwarded/copied Telegram messages from whitelisted curators (DM-only).
 2. **Robust storage** to MinIO with safe slugs, deterministic paths, album grouping, and strong deduplication.
 3. **Rich metadata** recorded per message (one JSON per message) with a nested `telegram` section preserving protocol details.
-4. **Operator feedback** via Markdown/HTML ack with telemetry (counts, sizes, dedup hits, MinIO usage %, elapsed time, etc.).
+4. **Enhanced operator feedback** via rich Markdown ack with emojis, telemetry (counts, sizes, dedup hits, processing status, etc.).
 5. **Operational resilience** (retries, health/metrics endpoints, structured logging, rotation).
-6. **Clear capacity behavior** (daily notifications ≥ threshold; hard pause at 100% and informative acks).
+6. **Real-time capacity monitoring** with immediate pause at 100% and informative acks.
 
 ---
 
@@ -30,13 +30,18 @@ Non-goal: content processing (OCR/transcription/summarization). MVP is strictly 
 
 - **Language:** Python 3.12
 - **OS / Base Image:** Ubuntu 24.04 (Docker container)
-- **Telegram:** Bot API via **python-telegram-bot**
-- **Storage:** MinIO (S3-compatible) via **boto3** or **minio** Python SDK
+- **Telegram:** Bot API via **python-telegram-bot** with rate limiting; MTProto via **Telethon** (worker)
+- **Storage:** MinIO (S3-compatible) via **minio** Python SDK
 - **DB:** SQLite (Docker volume `teltubby_db`, file `/data/teltubby.db`)
 - **Slugging:** `python-slugify` + `Unidecode` (Cyrillic→Latin transliteration)
 - **Orchestration:** Docker Desktop (Win 11) for dev; Ubuntu 24.04 host in prod (Portainer/NPM friendly)
 - **Service Ports:** Internal **8080** (webhook mode), **8081** (`/healthz`, `/metrics`)
 - **Modes:** **Long-polling** (dev/MVP) and **Webhook** (prod) toggled by ENV flag
+
+### 2.1 MTProto Worker
+- **Queue**: RabbitMQ durable queues with dead-letter exchange (DLX)
+- **Worker**: Independent container (`mtworker`) consuming `teltubby.large_files`
+- **Auth**: Login code and optional 2FA password provided via bot commands (`/mtcode`, `/mtpass`)
 
 ---
 
@@ -49,17 +54,18 @@ Non-goal: content processing (OCR/transcription/summarization). MVP is strictly 
 - **Ignored:** Any message from non-whitelisted users; any group chat activity (DM-only ingestion).
 
 ### 3.2 Albums (Media Groups)
-- Use Telegram media-group aggregation window **10s** to collect all group items before persisting.
-- If incomplete after 10s, persist what is available; record missing items in JSON (see §8).
+- Use Telegram media-group aggregation window **2s** (configurable) to collect all group items before persisting.
+- **Pre-validation** of all album items before processing to prevent partial failures.
+- If incomplete after window expires, persist what is available; record missing items in JSON.
 
 ### 3.3 Supported Media
 - Photos (store **highest-resolution version only**), Videos, Documents, Audio, Voice Notes, Video Notes, GIFs/Animations, Stickers (store **as-is**), and any other file-like payloads exposed by the Bot API.
 - Locations/contacts/polls are logged in JSON if present; no binary objects stored.
 
-### 3.4 Bot API File Size Limits
-- Detect Telegram Bot API **max file size at runtime** and record this value in ack.
-- **Skip** any file that exceeds: (a) Bot API max **or** (b) configured `MAX_FILE_GB` (default **4 GB**).  
-  - Skips are itemized in the ack with reason.
+### 3.4 File Size Limits
+- **Skip** any file that exceeds: (a) Bot API max (50MB) **or** (b) configured `MAX_FILE_GB` (default **4 GB**).  
+  - Skips are itemized in the ack with specific reason codes.
+  - Size validation happens both before and after download for comprehensive coverage.
 
 ---
 
@@ -89,9 +95,9 @@ Non-goal: content processing (OCR/transcription/summarization). MVP is strictly 
 - **Albums:** All items of a message/album stored in the same directory.  
 - **Ordering suffixes:** `-001`, `-002`, `-003`, … based on Telegram sequence; fallback to message timestamp if needed.
 
-### 5.3 Multipart Uploads
-- Threshold: **8–16 MB** (default **8 MB**)  
-- Part size: **8–32 MB** (default **16 MB**)
+### 5.3 File Uploads
+- **Standard uploads** for all file sizes
+- **Private ACL** enforced on all objects
 
 ### 5.4 ACL & Links
 - All objects **private**; JSON stores **keys only** (no pre-signed URLs). Operators can generate links ad hoc.
@@ -131,14 +137,14 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
 ### 7.3 SQLite Index (Persistent)
 - **Volume:** `teltubby_db` → `/data/teltubby.db`
 - **Scope:** **Global across bucket** (one bot per bucket)
-- **Tables (indicative):**
+- **Tables (implemented):**
   - `files(sha256 TEXT PRIMARY KEY, s3_key TEXT NOT NULL, size_bytes INTEGER, mime TEXT, created_at TEXT)`
   - `tg_map(file_unique_id TEXT PRIMARY KEY, sha256 TEXT NOT NULL, FOREIGN KEY(sha256) REFERENCES files(sha256))`
   - `messages(message_id TEXT, chat_id TEXT, media_group_id TEXT, created_at TEXT, PRIMARY KEY(message_id, chat_id))`
 - **Indexes:**  
   - `idx_files_created_at`, `idx_tg_map_sha256`, `idx_messages_group`
 - **Maintenance:**  
-  - **Daily** VACUUM + backup; on-demand via DM command (see §13.2)
+  - On-demand via DM command `/db_maint` (VACUUM)
 
 ---
 
@@ -162,7 +168,7 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
   - `keys`: array of S3 object keys for each stored media item (ordered)
   - `duplicate_of`: string | null
   - `dedup_reason`: `"file_unique_id" | "sha256" | null`
-  - `notes`: optional string (e.g., partial album)
+  - `notes`: optional string (e.g., validation failures)
 - **`telegram` (nested)**
   - `message_id`: string
   - `media_group_id`: string | null
@@ -175,7 +181,6 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
   - `caption_plain`: string | null
   - `caption_entities`: array (raw entities with offsets/types)
   - `entities`: array (raw entities with offsets/types)
-  - `bot_api_max_file_size_bytes`: integer (detected at runtime)
   - `items`: array of objects, each:
     - `ordinal`: integer (1-based)
     - `type`: `"photo" | "video" | "document" | "audio" | "voice" | "animation" | "sticker" | ..."`
@@ -195,41 +200,43 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
 ## 9) Acknowledgement & Telemetry
 
 ### 9.1 Reply Format
-- **Markdown/HTML** formatted template in DMs to curator.
+- **Rich Markdown** with emojis for enhanced readability in Telegram UI.
 
 ### 9.2 Included Metrics
-- `files_count`, list of **media types**
-- **Album items & order**
+- `files_count`, list of **media types** with emojis
 - **Total bytes uploaded**
 - **Base S3 path** (prefix)
 - **Dedup hits** (count + which ordinals)
-- **Elapsed time** (download + upload)
-- **MinIO capacity**: used % and free (bucket quota)
-- **Telegram Bot API max file size** at runtime
-- **Skipped items** with **reasons** (e.g., exceeds Bot API limit, exceeds configured MAX_FILE_GB)
+- **Skipped items** with **specific reasons** (e.g., exceeds Bot API limit, exceeds configured MAX_FILE_GB, download failures)
+- **Processing status** with visual indicators
+
+### 9.3 Enhanced UX Features
+- **Real-time typing indicators** during processing
+- **Emoji-rich formatting** for better visual hierarchy
+- **Specific error messages** with actionable information
+- **Album validation feedback** for multi-item uploads
 
 ---
 
 ## 10) Quota Monitoring & Alerts (MinIO)
 
 - Source of truth: **bucket quota** via MinIO API (same creds/session).
-- **Threshold:** configurable; default **≥80%** → notification.
-- **Frequency:** **once per day** while above threshold (no repeated nagging).
+- **Real-time monitoring** of bucket usage percentage.
 - **100% full:**  
-  - **Pause ingestion** (do not upload);  
+  - **Immediate pause ingestion** (do not upload);  
   - Ack explains pause and suggests remediation;  
-  - Continue to send daily status until free space is available.
+  - Continue to monitor until free space is available.
 
 ---
 
 ## 11) Reliability, Timeouts & Retries
 
 - **Per-transfer timeout:** 60s (download/upload)
-- **Retries:** 3 attempts; exponential backoff (e.g., 1s, 3s, 9s)
+- **Album validation** before processing to prevent partial failures
 - **Atomicity:**  
   - Only create JSON after all media outcomes (stored/skipped) are known.  
   - JSON always reflects dedup/skips for auditability.
-- **Partial Albums:** JSON `notes` indicates missing items if aggregation window elapsed.
+- **Partial Albums:** JSON `notes` indicates validation failures if any items cannot be processed.
 
 ---
 
@@ -239,7 +246,6 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
   - **Rotation:** max file size **5 MB**, keep **10** files by default (ENV configurable).
 - **/healthz** (port **8081**):  
   - Reports OK if process is alive and can reach Telegram (lightweight check).  
-  - Optional MinIO probe with a noop head/list.
 - **/metrics** (port **8081**): Prometheus text exposition, including:
   - `teltubby_ingested_messages_total`
   - `teltubby_ingested_bytes_total`
@@ -254,13 +260,13 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
 ## 13) Bot UX & Admin Commands
 
 ### 13.1 Public (whitelisted curator) Commands
-- `/start`, `/help` — brief usage and constraints
-- `/status` — counters, MinIO usage %, Bot API max file size
-- `/quota` — current bucket used/free
+- `/start`, `/help` — brief usage and constraints with emoji formatting
+- `/status` — current mode and MinIO usage % with visual indicators
+- `/quota` — current bucket used/free with status emojis
 - Ingest flow: curator forwards or copies target messages to the bot in **DM**.
 
 ### 13.2 Admin/Maintenance (whitelisted only)
-- `/db_maint` — run **daily maintenance** now (VACUUM + lightweight backup/export)
+- `/db_maint` — run **database maintenance** now (VACUUM)
 - `/mode` — print current mode (long-poll/webhook) and configured endpoints
 
 > **Note:** Whitelist IDs are authoritative; all command handling is restricted accordingly.
@@ -284,25 +290,28 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
   - `S3_FORCE_PATH_STYLE` (true for MinIO)
   - `MINIO_TLS_SKIP_VERIFY` (default false)
 - **Ingestion**
-  - `ALBUM_AGGREGATION_WINDOW_SECONDS` (default 10)
+  - `ALBUM_AGGREGATION_WINDOW_SECONDS` (default 2)
   - `MAX_FILE_GB` (default 4)
+ - **Queue / RabbitMQ**
+   - `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`
+   - `JOB_QUEUE_NAME`, `JOB_DEAD_LETTER_QUEUE`, `JOB_EXCHANGE`, `JOB_DLX_EXCHANGE`
 - **Dedup / DB**
   - `SQLITE_PATH` (default `/data/teltubby.db`)
   - `DEDUP_ENABLE` (default true)
 - **Concurrency & I/O**
   - `CONCURRENCY` (default 8, max 32)
   - `IO_TIMEOUT_SECONDS` (default 60)
-  - `S3_MULTIPART_THRESHOLD_MB` (default 8)
-  - `S3_MULTIPART_PART_SIZE_MB` (default 16)
 - **Quota & Alerts**
-  - `QUOTA_ALERT_THRESHOLD_PCT` (default 80)
-  - `QUOTA_ALERT_COOLDOWN_HOURS` (default 24)
+  - `S3_BUCKET_QUOTA_BYTES` (optional, for quota monitoring)
 - **Logging & Health**
   - `LOG_LEVEL` (e.g., INFO/DEBUG/WARN/ERROR)
   - `LOG_ROTATE_MAX_BYTES` (default 5MB)
   - `LOG_ROTATE_BACKUP_COUNT` (default 10)
   - `HEALTH_PORT` (default 8081)
   - `BIND_HEALTH_LOCALHOST_ONLY` (default true)
+ - **MTProto / Worker**
+   - `MTPROTO_API_ID`, `MTPROTO_API_HASH`, `MTPROTO_PHONE_NUMBER`, `MTPROTO_SESSION_PATH`
+   - `WORKER_CONCURRENCY`, `WORKER_MAX_RETRIES`, `WORKER_RETRY_DELAY_SECONDS`
 
 ---
 
@@ -323,6 +332,7 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
 - **Out-of-order album forwards**: rely on Telegram group ordering; fallback to timestamps.
 - **Oversize files**: skip + record reason in JSON and ack.
 - **Non-media messages**: create JSON with context only if accompanied by media; otherwise noop for archival.
+- **Album validation failures**: skip entire album if any item cannot be processed.
 
 ---
 
@@ -334,7 +344,7 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
    - Album of 3–5 mixed media; out-of-order delivery; partial album at window end.  
    - Duplicate forwards (same media from multiple messages/chats).  
    - Oversize file skip behavior.  
-   - Quota thresholds and daily alert cadence; 100% pause path.
+   - Quota thresholds and pause at 100% path.
 3. **E2E**: DM from whitelisted curator, ack template correctness, MinIO objects present, JSON integrity.
 4. **Resilience**: induced S3/Telegram transient failures; backoff and eventual success; logging coverage.
 5. **Security**: non-whitelisted DM ignored; commands restricted to whitelisted IDs; webhook secret validated (when enabled).
@@ -343,8 +353,8 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
 - Full capture of forwarded/copied DMs (including albums) with deterministic slugs and proper ordering.  
 - Private S3 objects; JSON stores **keys only**.  
 - Dedup works (no duplicate object storage); JSON reflects linkage (`duplicate_of`, `dedup_reason`).  
-- Ack telemetry includes all specified fields, Bot API max size, and detailed skip reasons.  
-- Quota alerts at threshold (daily), **ingestion pause at 100%** with clear ack.  
+- Rich ack telemetry includes all specified fields and detailed skip reasons.  
+- Quota monitoring with **ingestion pause at 100%** with clear ack.  
 - `/healthz` and `/metrics` available on **8081** (localhost by default).  
 
 ---
@@ -355,7 +365,7 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
 - **Add curator:** update `TELEGRAM_WHITELIST_IDS` ENV; redeploy or support hot-reload if implemented.
 - **Switch to prod (webhook):** set `TELEGRAM_MODE=webhook`, `WEBHOOK_URL`, `WEBHOOK_SECRET`; expose 8080 via NPM; verify Telegram webhook set.
 - **Quota watch:** review `/status`, `/quota`, and Prometheus metrics; expand MinIO capacity when alerts fire.
-- **DB maintenance:** schedule daily VACUUM; run `/db_maint` for immediate compaction/backup.
+- **DB maintenance:** run `/db_maint` for immediate compaction.
 - **Logs:** review stdout JSON and rotating files; adjust `LOG_LEVEL` as needed.
 
 ---
@@ -391,4 +401,4 @@ YYYYMMDD-HHMMSS_{chat_or_source}_{sender}_m{message_id}{-g{media_group_id}}_{ord
 ---
 
 **End of Requirements**  
-*This document is authoritative for MVP implementation of **teltubby**.*
+*This document is authoritative for MVP implementation of **teltubby** and reflects the current implementation state.*

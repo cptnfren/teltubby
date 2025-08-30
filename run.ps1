@@ -80,9 +80,9 @@ $env:S3_FORCE_PATH_STYLE      = "true"                 # [bool-string]
 $env:MINIO_TLS_SKIP_VERIFY    = "true"                 # [bool-string] only for self-signed dev
 
 # --- Ingestion ---
-$env:ALBUM_AGGREGATION_WINDOW_SECONDS = "10"          # [int-string]
-$env:MAX_FILE_GB                      = "4"           # [int-string]
-$env:BOT_API_MAX_FILE_SIZE_BYTES      = "52428800"    # [int-string] 50MB
+$env:ALBUM_AGGREGATION_WINDOW_SECONDS = "2"           # [int-string] configurable window for album aggregation
+$env:MAX_FILE_GB                      = "4"           # [int-string] maximum file size in GB
+$env:BOT_API_MAX_FILE_SIZE_BYTES      = "52428800"    # [int-string] 50MB Telegram Bot API limit
 
 # --- Dedup / DB ---
 $env:SQLITE_PATH              = "/data/teltubby.db"
@@ -91,14 +91,10 @@ $env:DEDUP_ENABLE            = "true"
 # --- Concurrency & I/O ---
 $env:CONCURRENCY             = "8"
 $env:IO_TIMEOUT_SECONDS      = "60"
-$env:S3_MULTIPART_THRESHOLD_MB = "8"
-$env:S3_MULTIPART_PART_SIZE_MB = "16"
 
 # --- Quota & Alerts ---
-$env:QUOTA_ALERT_THRESHOLD_PCT  = "80"
-$env:QUOTA_ALERT_COOLDOWN_HOURS = "24"
 # Optional explicit bucket quota in bytes to simulate capacity locally (e.g., 10485760 = 10MB)
-$env:S3_BUCKET_QUOTA_BYTES      = ""  # leave empty to disable
+$env:S3_BUCKET_QUOTA_BYTES      = ""  # leave empty to disable (real-time monitoring when set)
 
 # --- Logging & Health ---
 $env:LOG_LEVEL                 = "INFO"

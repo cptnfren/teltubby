@@ -33,6 +33,16 @@ services:
       - LOG_ROTATE_BACKUP_COUNT=${LOG_ROTATE_BACKUP_COUNT:-10}
       - HEALTH_PORT=${HEALTH_PORT:-8081}
       - BIND_HEALTH_LOCALHOST_ONLY=${BIND_HEALTH_LOCALHOST_ONLY:-true}
+      # RabbitMQ (for MTProto job queue)
+      - RABBITMQ_HOST=${RABBITMQ_HOST:-rabbitmq}
+      - RABBITMQ_PORT=${RABBITMQ_PORT:-5672}
+      - RABBITMQ_USERNAME=${RABBITMQ_USERNAME:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
+      - JOB_QUEUE_NAME=${JOB_QUEUE_NAME:-teltubby.large_files}
+      - JOB_DEAD_LETTER_QUEUE=${JOB_DEAD_LETTER_QUEUE:-teltubby.failed_jobs}
+      - JOB_EXCHANGE=${JOB_EXCHANGE:-teltubby.exchange}
+      - JOB_DLX_EXCHANGE=${JOB_DLX_EXCHANGE:-teltubby.dlx}
     volumes:
       - teltubby_db:/data
     ports:
@@ -41,10 +51,70 @@ services:
       # - "8080:8080"
     networks:
       - minio_default
+    depends_on:
+      - rabbitmq
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "${HOST_RABBITMQ_PORT:-5672}:5672"
+      - "${HOST_RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - minio_default
+
+  mtworker:
+    build: .
+    image: teltubby:dev
+    container_name: mtworker
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_MODE=polling
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_REGION=${S3_REGION}
+      - S3_FORCE_PATH_STYLE=${S3_FORCE_PATH_STYLE:-true}
+      - MINIO_TLS_SKIP_VERIFY=${MINIO_TLS_SKIP_VERIFY:-false}
+      - SQLITE_PATH=/data/teltubby.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - RABBITMQ_HOST=${RABBITMQ_HOST:-rabbitmq}
+      - RABBITMQ_PORT=${RABBITMQ_PORT:-5672}
+      - RABBITMQ_USERNAME=${RABBITMQ_USERNAME:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - RABBITMQ_VHOST=${RABBITMQ_VHOST:-/}
+      - JOB_QUEUE_NAME=${JOB_QUEUE_NAME:-teltubby.large_files}
+      - JOB_DEAD_LETTER_QUEUE=${JOB_DEAD_LETTER_QUEUE:-teltubby.failed_jobs}
+      - JOB_EXCHANGE=${JOB_EXCHANGE:-teltubby.exchange}
+      - JOB_DLX_EXCHANGE=${JOB_DLX_EXCHANGE:-teltubby.dlx}
+      - MTPROTO_API_ID=${MTPROTO_API_ID}
+      - MTPROTO_API_HASH=${MTPROTO_API_HASH}
+      - MTPROTO_PHONE_NUMBER=${MTPROTO_PHONE_NUMBER}
+      - MTPROTO_SESSION_PATH=${MTPROTO_SESSION_PATH:-/data/mtproto.session}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-1}
+      - WORKER_MAX_RETRIES=${WORKER_MAX_RETRIES:-3}
+      - WORKER_RETRY_DELAY_SECONDS=${WORKER_RETRY_DELAY_SECONDS:-60}
+    entrypoint: ["python3.12", "-m", "teltubby.mtproto.worker"]
+    volumes:
+      - teltubby_db:/data
+    depends_on:
+      - rabbitmq
+    networks:
+      - minio_default
 
 volumes:
   teltubby_db:
     name: teltubby_db
+  rabbitmq_data:
+    name: rabbitmq_data
 
 networks:
   minio_default:

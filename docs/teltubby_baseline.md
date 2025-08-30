@@ -1,60 +1,307 @@
-# teltubby — Baseline Context (Condensed)
+# teltubby — Complete Project Context
 
 **Mission:**  
-`teltubby` is a Python 3.12 Telegram archival bot. It ingests **forwarded/copied DMs from whitelisted curators**, saves all media and metadata into a **MinIO (S3-compatible)** bucket with safe filenames, structured JSON, and **deduplication**. It provides formatted acks with telemetry and enforces quota rules.
+`teltubby` is a Python 3.12 Telegram archival bot that ingests **forwarded/copied DMs from whitelisted admin curators**, saves all media and metadata into **MinIO (S3-compatible)** storage with safe filenames, structured JSON, and **deduplication**. It provides formatted acks with telemetry, enforces quota rules, and handles large files (>50MB) via MTProto integration.
 
 ---
 
-## Core Rules
-- **Source:** DM only; ignore groups. Accept forwards + copies. If no `forward_*`, store as copy (`forward_origin=null`).  
-- **Whitelist:** Only curator IDs from ENV. Unauthorized = silent ignore.  
-- **Ack:** Markdown/HTML. Includes file count, types, total size, album order, base S3 path, dedup hits, elapsed time, MinIO used%/free, Bot API max file size, and skip reasons.  
-- **Quota:** Use MinIO bucket quota. Alert ≥80% (once daily). Pause ingestion at 100% and notify.  
+## 🏗️ System Architecture
+
+### **Current MVP (Implemented)**
+- **Bot API Processing**: Handles files ≤50MB with existing pipeline
+- **MinIO/S3 Storage**: Deterministic paths, deduplication, quota monitoring
+- **SQLite Database**: Job tracking, dedup index, metrics
+- **Health Monitoring**: `/healthz`, `/metrics` on port 8081
+
+### **MTProto Integration (Implemented)**
+- **Hybrid Processing**: Bot API (≤50MB) + MTProto (>50MB)
+- **RabbitMQ Job Queue**: Persistent job management with DLX and admin commands
+- **MTProto Worker**: Independent service for large file processing
+- **Unified Experience**: Single bot interface for all operations
 
 ---
 
-## Storage
-- **Layout:** `teltubby/{YYYY}/{MM}/{chat_slug}/{message_id}/...`  
-- **Albums:** Folder per message/album, suffixes `-001`, `-002`…; order by Telegram group seq (fallback timestamp).  
-- **Files:** Highest-res photos only. Multipart uploads >8MB. All objects private.  
-- **Slugs:** Lowercase `[a-z0-9._-]`; transliterate Cyrillic→Latin. Include 6 caption words. Max 120 chars. Keep original extensions.  
+## 📋 Core Rules & Constraints
+
+### **Access Control**
+- **Whitelist Only**: Only curator IDs from ENV can interact
+- **All Users Are Admins**: Every whitelisted user has full system access
+- **DM Only**: Ignores group messages completely
+- **Forward/Copy Support**: Accepts both forwarded and manually copied messages
+
+### **File Processing**
+- **Bot API Limit**: 50MB maximum (Telegram constraint)
+- **MTProto Limit**: 2GB maximum (user account constraint)
+- **Size Detection**: Automatic routing based on file size
+- **Album Support**: 2-second configurable aggregation window
+
+### **Storage & Deduplication**
+- **Layout**: `teltubby/{YYYY}/{MM}/{chat_slug}/{message_id}/...`
+- **Albums**: Folder per message with `-001`, `-002` suffixes
+- **Dedup Signals**: `file_unique_id` + SHA-256 hash
+- **Policy**: Skip duplicates, log with `duplicate_of` + `dedup_reason`
 
 ---
 
-## JSON (per message)
-- **Top-level:** schema_version, archive_timestamp_utc, message_timestamp_utc, bucket, base_path, files_count, total_bytes_uploaded, keys[], duplicate_of, dedup_reason, notes.  
-- **telegram block:** message_id, media_group_id, chat info, sender, forward_origin, caption_plain, entities, bot_api_max_file_size_bytes, items[].  
-- **Items:** ordinal, type, mime, size, dims/duration, file_id, file_unique_id, original_filename, sha256, s3_key.  
+## 🔄 Processing Workflows
+
+### **Small Files (≤50MB) - Current Implementation**
+1. **Detection**: File size check in bot
+2. **Processing**: Immediate upload via existing pipeline
+3. **Storage**: Direct MinIO/S3 upload with metadata
+4. **Response**: Rich telemetry acknowledgment with emojis
+
+### **Large Files (>50MB) - MTProto Integration**
+1. **Detection**: File size exceeds 50MB limit
+2. **Job Creation**: RabbitMQ job with file context
+3. **User Notification**: "Queued for processing" message
+4. **Background Processing**: MTProto worker downloads and uploads
+5. **Completion**: Status update and final acknowledgment
 
 ---
 
-## Deduplication
-- **Signals:** file_unique_id + SHA-256.  
-- **Policy:** Skip storing duplicates. JSON still written with `duplicate_of` + `dedup_reason`.  
-- **Index:** SQLite on Docker volume `/data/teltubby.db`. Daily VACUUM + DM-triggered maintenance.  
+## 🗄️ Data Structures
+
+### **Message JSON Schema**
+```json
+{
+  "schema_version": "1.0",
+  "archive_timestamp_utc": "iso_timestamp",
+  "message_timestamp_utc": "iso_timestamp",
+  "bucket": "bucket_name",
+  "base_path": "teltubby/2025/01/chat_slug/message_id",
+  "files_count": 3,
+  "total_bytes_uploaded": 1048576,
+  "keys": ["s3_key_1", "s3_key_2"],
+  "duplicate_of": null,
+  "dedup_reason": null,
+  "notes": "Processing notes",
+  "telegram": {
+    "message_id": "123",
+    "media_group_id": "group_456",
+    "chat": {...},
+    "sender": {...},
+    "forward_origin": {...},
+    "caption_plain": "User caption",
+    "entities": [...],
+    "items": [...]
+  }
+}
+```
+
+### **Job Queue Schema (MTProto Integration)**
+```json
+{
+  "job_id": "uuid-v4",
+  "user_id": "telegram_user_id",
+  "chat_id": "telegram_chat_id",
+  "message_id": "telegram_message_id",
+  "file_info": {
+    "file_id": "telegram_file_id",
+    "file_unique_id": "telegram_unique_id",
+    "file_size": 104857600,
+    "file_type": "video",
+    "file_name": "large_video.mp4",
+    "mime_type": "video/mp4"
+  },
+  "telegram_context": {...},
+  "job_metadata": {
+    "created_at": "iso_timestamp",
+    "priority": "normal|high|urgent",
+    "retry_count": 0,
+    "max_retries": 3
+  }
+}
+```
 
 ---
 
-## Ops
-- **Runtime:** Docker (Ubuntu 24.04).  
-- **Modes:** Long polling (dev) or webhook (prod, NPM/TLS). Config flag toggles.  
-- **ENV Config:** Telegram token, whitelist IDs, MinIO creds, concurrency (default 8), timeouts, quotas, logging.  
-- **Logging:** JSON logs + rotating files (5MB × 10).  
-- **Health:** `/healthz`, `/metrics` on port 8081 (localhost default).  
+## 🎮 User Commands & Experience
+
+### **Current Commands**
+- `/start` - Bot initialization and help
+- `/help` - Command reference and usage
+- `/status` - System health and current status
+- `/quota` - Storage usage and quota information
+- `/mode` - Show current operation mode
+- `/db_maint` - Database maintenance (VACUUM)
+
+### **MTProto Integration Commands**
+- `/queue` - Show pending and processing jobs
+- `/jobs <job_id>` - Show specific job details
+- `/retry <job_id>` - Retry failed job
+- `/cancel <job_id>` - Cancel pending job
+- `/mtcode <code>` - Submit MTProto login code (worker polls)
+- `/mtpass <password>` - Submit MTProto 2FA password (optional)
+
+### **User Experience Flow**
+1. **File Submission**: User sends file (any size)
+2. **Immediate Response**: Bot acknowledges receipt
+3. **Processing Status**: Real-time updates via typing indicators
+4. **Completion**: Rich telemetry with file details and storage info
+5. **Large Files**: Additional status tracking and progress updates
 
 ---
 
-## Commands
-- **Curators:** `/start`, `/help`, `/status`, `/quota` + forward/copy messages.  
-- **Admin:** `/db_maint` (VACUUM/backup), `/mode` (show current mode).  
+## 🔧 Technical Implementation
+
+### **Core Components**
+- **`main.py`**: Application entry point and bot initialization
+- **`bot/service.py`**: Telegram bot service and command handling
+- **`ingest/pipeline.py`**: File processing pipeline and album aggregation
+- **`storage/s3_client.py`**: MinIO/S3 client for file storage
+- **`db/dedup.py`**: Deduplication logic and SQLite operations
+- **`quota/quota.py`**: Storage quota monitoring and enforcement
+- **`web/health.py`**: Health checks and metrics endpoints
+
+### **MTProto Integration Components (Implemented)**
+- **`queue/job_manager.py`**: RabbitMQ job creation and management
+- **`mtproto/worker.py`**: MTProto client service for large files
+- **`mtproto/client.py`**: MTProto client implementation
+
+### **Configuration & Environment**
+```bash
+# Core Configuration
+TELEGRAM_BOT_TOKEN="bot_token"
+TELEGRAM_WHITELIST_IDS="123456789,987654321"
+ALBUM_AGGREGATION_WINDOW_SECONDS="2"
+CONCURRENCY="8"
+IO_TIMEOUT_SECONDS="60"
+
+# Storage Configuration
+S3_ENDPOINT="minio:9000"
+S3_ACCESS_KEY="access_key"
+S3_SECRET_KEY="secret_key"
+S3_BUCKET="teltubby"
+S3_BUCKET_QUOTA_BYTES=""
+
+# MTProto Configuration (Planned)
+MTPROTO_API_ID="your_api_id"
+MTPROTO_API_HASH="your_api_hash"
+MTPROTO_PHONE_NUMBER="your_phone_number"
+RABBITMQ_HOST="localhost"
+RABBITMQ_PORT="5672"
+```
 
 ---
 
-## Acceptance Criteria (MVP)
-- 100% archival of forwarded/copied DMs (incl. albums).  
-- Deterministic slugs + JSON alongside media.  
-- Private MinIO objects; JSON stores keys only.  
-- Dedup works globally.  
-- Ack telemetry complete.  
-- Quota alerts daily, pause at 100%.  
-- `/healthz` + `/metrics` functional.  
+## 🚀 Deployment & Operations
+
+### **Runtime Environment**
+- **Container**: Docker (Ubuntu 24.04 base)
+- **Orchestration**: Docker Compose for local development
+- **Storage**: MinIO container with persistent volumes
+- **Database**: SQLite on Docker volume `/data/teltubby.db`
+
+### **Service Architecture**
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Telegram     │    │   RabbitMQ     │    │   MTProto      │
+│     Bot        │◄──►│   Job Queue     │◄──►│    Worker      │
+│  (Bot API)     │    │   (Persistent)  │    │ (User Account)  │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   MinIO/S3     │    │   Job History   │    │   Session      │
+│   Storage      │    │   Database      │    │   Management   │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+### **Health & Monitoring**
+- **Health Endpoint**: `/healthz` for service status
+- **Metrics Endpoint**: `/metrics` for Prometheus metrics
+- **Logging**: JSON structured logs with rotation (5MB × 10)
+- **Port**: 8081 (localhost default)
+
+---
+
+## 📊 Key Features & Capabilities
+
+### **Implemented Features (MVP)**
+- ✅ **Album Aggregation**: 2-second configurable window
+- ✅ **Pre-validation**: Album items validated before processing
+- ✅ **Real-time Feedback**: Typing indicators during processing
+- ✅ **Rich Telemetry**: Emoji-rich acknowledgments with detailed status
+- ✅ **Smart Error Handling**: Specific failure reasons and recovery
+- ✅ **Quota Management**: Real-time monitoring with pause at 100%
+- ✅ **Prometheus Metrics**: Comprehensive monitoring and alerting
+- ✅ **Deduplication**: Global dedup using file_unique_id + SHA-256
+
+### **MTProto Integration (Implemented)**
+- 🔄 **Large File Support**: 0MB to 2GB file size range
+- 🔄 **Job Queue System**: Persistent RabbitMQ with DLX
+- 🔄 **MTProto Worker**: Independent service for large files
+- 🔄 **Unified Interface**: Single bot for all file sizes
+- 🔄 **Admin Controls**: Queue management for all whitelisted users
+- 🔄 **Progress Tracking**: Completion notifications in DM
+
+---
+
+## 🎯 Success Criteria & Acceptance
+
+### **MVP Requirements (✅ Complete)**
+- 100% archival of forwarded/copied DMs (≤50MB)
+- Deterministic slugs + JSON alongside media
+- Private MinIO objects with deduplication
+- Rich telemetry acknowledgments
+- Quota monitoring with pause at 100%
+- Health endpoints functional
+
+### **MTProto Integration Requirements (🔄 Planned)**
+- Large files (>50MB) processed successfully
+- User experience maintained through bot interface
+- Job queue resilience across service restarts
+- Error handling and user notifications working
+- Admin controls accessible to all whitelisted users
+- 99%+ job success rate for valid files
+
+---
+
+## 🔮 Future Enhancements
+
+### **Advanced Features**
+- Multiple MTProto workers for high-volume processing
+- Priority job handling for urgent files
+- Batch processing for multiple large files
+- Advanced retry logic with different strategies
+
+### **Integration Opportunities**
+- Web interface for job monitoring and management
+- API endpoints for external job submission
+- Notification systems for job completion
+- Analytics dashboard for processing metrics
+
+### **Scalability Improvements**
+- Worker clustering for load distribution
+- Queue partitioning by file type or size
+- Storage optimization for large file handling
+- Caching layers for improved performance
+
+---
+
+## ⚠️ Important Notes for AI Agents
+
+### **Current State**
+- **MVP is fully implemented** and functional
+- **All documented features work** as specified
+- **Code is production-ready** for ≤50MB files
+- **Architecture is stable** and well-tested
+
+### **Development Guidelines**
+- **Maintain existing patterns** when extending functionality
+- **Follow established naming conventions** and code structure
+- **Preserve user experience** - no breaking changes to bot interface
+- **Test thoroughly** - especially file size routing logic
+- **Document changes** in relevant markdown files
+
+### **Integration Points**
+- **Bot service**: Extend for job creation and status updates
+- **Pipeline**: Add file size detection and routing logic
+- **Storage**: Ensure consistent naming and metadata
+- **Database**: Extend for job history and tracking
+- **Health checks**: Include queue and worker status
+
+---
+
+**This document provides complete context for AI agents working on the teltubby project, covering both current implementation and planned MTProto integration features.**
