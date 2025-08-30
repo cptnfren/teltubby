@@ -924,10 +924,19 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
 
                 for m in items:
                     finfo = await _extract_file_info(m)
+                    logger.info(f"Extracted file info: {finfo}")
                     if not finfo or finfo.get("file_id") is None:
                         to_process.append(m)
                         continue
                     size_hint = finfo.get("file_size") or 0
+                    
+                    # Debug logging for file size routing
+                    routing_to_mtproto = size_hint and size_hint > bot_limit
+                    logger.info(
+                        f"File size check: size_hint={size_hint}, "
+                        f"bot_limit={bot_limit}, routing_to_mtproto={routing_to_mtproto}"
+                    )
+                    
                     if size_hint and size_hint > bot_limit:
                         # Create and publish a job
                         job_id = self._jobs.new_job_id()
