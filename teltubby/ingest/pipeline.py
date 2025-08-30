@@ -273,8 +273,38 @@ async def process_batch(
             continue
 
         # Download to temp to compute sha256
-        tfile = await bot.get_file(file_id)
-        tmp_path, content_size, sha256 = await _download_to_temp(tfile)
+        try:
+            tfile = await bot.get_file(file_id)
+            tmp_path, content_size, sha256 = await _download_to_temp(tfile)
+        except Exception as e:
+            # Handle "File is too big" and other download errors
+            if "File is too big" in str(e):
+                reason = "exceeds_bot_limit"
+                # Estimate size from file_id if possible, or use a large placeholder
+                estimated_size = size_hint or (100 * 1024 * 1024)  # 100MB placeholder
+            else:
+                reason = "download_failed"
+                estimated_size = size_hint or 0
+            
+            outcome = ItemOutcome(
+                ordinal=idx,
+                type=mtype,
+                mime_type=mime,
+                size_bytes=estimated_size,
+                width=width,
+                height=height,
+                duration=duration,
+                file_id=file_id,
+                file_unique_id=file_unique_id,
+                original_filename=original_name,
+                sha256=None,
+                s3_key=None,
+                is_duplicate=False,
+                skipped_reason=reason,
+            )
+            result.outcomes.append(outcome)
+            SKIPPED_ITEMS.inc()
+            continue
 
         # Enforce size after download when hint missing
         if content_size > bot_limit or content_size > max_bytes_cfg:
