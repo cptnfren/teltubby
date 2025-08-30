@@ -54,6 +54,12 @@ class ItemOutcome:
 
 
 @dataclass
+class ValidationResult:
+    is_valid: bool
+    failure_reason: Optional[str] = None
+
+
+@dataclass
 class BatchResult:
     base_path: str
     outcomes: List[ItemOutcome] = field(default_factory=list)
@@ -143,6 +149,33 @@ async def process_batch(
 
     # Sort messages by date as a fallback ordering
     messages_sorted = sorted(messages, key=lambda m: m.date.timestamp())
+    
+    # For albums (multiple messages), validate all items can be processed before starting
+    if len(messages) > 1:
+        validation_result = await _validate_album_items(cfg, dedup, messages_sorted)
+        if not validation_result.is_valid:
+            # Create failure outcomes for all items
+            for idx, m in enumerate(messages_sorted, start=1):
+                mtype, ext, mime = _detect_ext_and_mime(m)
+                outcome = ItemOutcome(
+                    ordinal=idx,
+                    type=mtype,
+                    mime_type=mime,
+                    size_bytes=None,
+                    width=None,
+                    height=None,
+                    duration=None,
+                    file_id="",
+                    file_unique_id="",
+                    original_filename=None,
+                    sha256=None,
+                    s3_key=None,
+                    is_duplicate=False,
+                    skipped_reason="album_validation_failed",
+                )
+                result.outcomes.append(outcome)
+            result.notes = f"Album validation failed: {validation_result.failure_reason}"
+            return result
 
     for idx, m in enumerate(messages_sorted, start=1):
         mtype, ext, mime = _detect_ext_and_mime(m)
@@ -456,4 +489,80 @@ def _build_json_artifact(cfg: AppConfig, messages: List[Message], res: BatchResu
         },
     }
     return artifact
+
+
+async def _validate_album_items(
+    cfg: AppConfig, 
+    dedup: DedupIndex, 
+    messages: List[Message]
+) -> ValidationResult:
+    """Validate that all album items can be processed before starting download."""
+    max_bytes_cfg = cfg.max_file_gb * 1024 * 1024 * 1024
+    bot_limit = cfg.bot_api_max_file_size_bytes or (50 * 1024 * 1024)
+    
+    for m in messages:
+        mtype, ext, mime = _detect_ext_and_mime(m)
+        
+        # Check if message has media content
+        if mtype == "unknown":
+            return ValidationResult(
+                is_valid=False, 
+                failure_reason="Message contains no media content"
+            )
+        
+        # Get file info for validation
+        file_id = None
+        file_unique_id = None
+        size_hint = None
+        
+        if m.photo:
+            ph = _pick_highest_photo(m)
+            if ph:
+                file_id = ph.file_id
+                file_unique_id = ph.file_unique_id
+                size_hint = ph.file_size
+        elif m.document:
+            file_id = m.document.file_id
+            file_unique_id = m.document.file_unique_id
+            size_hint = m.document.file_size
+        elif m.video:
+            file_id = m.video.file_id
+            file_unique_id = m.video.file_unique_id
+            size_hint = m.video.file_size
+        elif m.audio:
+            file_id = m.audio.file_id
+            file_unique_id = m.audio.file_unique_id
+            size_hint = m.audio.file_size
+        elif m.voice:
+            file_id = m.voice.file_id
+            file_unique_id = m.voice.file_unique_id
+            size_hint = m.voice.file_size
+        elif m.animation:
+            file_id = m.animation.file_id
+            file_unique_id = m.animation.file_unique_id
+            size_hint = m.animation.file_size
+        elif m.sticker:
+            file_id = m.sticker.file_id
+            file_unique_id = m.sticker.file_unique_id
+            size_hint = m.sticker.file_size
+        elif m.video_note:
+            file_id = m.video_note.file_id
+            file_unique_id = m.video_note.file_unique_id
+            size_hint = m.video_note.file_size
+        
+        if not file_id or not file_unique_id:
+            return ValidationResult(
+                is_valid=False, 
+                failure_reason="Unable to extract file information"
+            )
+        
+        # Check size limits if we have a hint
+        if size_hint and (size_hint > bot_limit or size_hint > max_bytes_cfg):
+            reason = "exceeds_bot_limit" if size_hint > bot_limit else "exceeds_cfg_limit"
+            return ValidationResult(
+                is_valid=False, 
+                failure_reason=f"File size {reason}: {size_hint} bytes"
+            )
+    
+    return ValidationResult(is_valid=True)
 

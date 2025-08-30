@@ -199,11 +199,21 @@ class TelemetryFormatter:
         )
     
     @classmethod
-    def format_ingestion_failed(cls) -> str:
-        """Format ingestion failure message."""
+    def format_ingestion_failed(cls, reason: str = None, item_count: int = 1) -> str:
+        """Format ingestion failure message with specific reason."""
+        if reason:
+            reason_text = f"\n{cls.EMOJIS['info']} **Reason:** {reason}"
+        else:
+            reason_text = ""
+        
+        if item_count > 1:
+            album_text = f"\n{cls.EMOJIS['info']} **Note:** Albums require all files to be processed successfully."
+        else:
+            album_text = ""
+        
         return (
-            f"{cls.EMOJIS['error']} **Ingestion Failed** {cls.EMOJIS['warning']}\n\n"
-            f"{cls.EMOJIS['info']} Something went wrong while processing your media.\n"
+            f"{cls.EMOJIS['error']} **Archive Failed** {cls.EMOJIS['warning']}\n\n"
+            f"{cls.EMOJIS['info']} Failed to archive your media.{reason_text}{album_text}\n"
             f"{cls.EMOJIS['info']} Please try again or contact support if the issue persists."
         )
     

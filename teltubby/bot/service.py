@@ -219,8 +219,28 @@ class TeltubbyBotService:
                             )
                         except Exception:
                             logger.exception("failed to send telemetry ack from finalizer")
-                    except Exception:
+                    except Exception as e:
                         logger.exception("finalizer ingestion failed")
+                        # Send failure message to user
+                        try:
+                            if "album_validation_failed" in str(e):
+                                reason = "Album validation failed - all files must be processable"
+                            elif "File is too big" in str(e):
+                                reason = "File exceeds Telegram bot API size limit (50MB)"
+                            else:
+                                reason = "Processing error occurred"
+                            
+                            text = TelemetryFormatter.format_ingestion_failed(
+                                reason=reason, 
+                                item_count=len(items)
+                            )
+                            await self._app.bot.send_message(
+                                chat_id=last_msg.chat_id,
+                                text=text,
+                                parse_mode=ParseMode.MARKDOWN
+                            )
+                        except Exception:
+                            logger.exception("failed to send failure message from finalizer")
         except asyncio.CancelledError:
             logger.info("album finalizer loop stopped")
 
@@ -351,6 +371,17 @@ class TeltubbyBotService:
             await message.reply_text(ack, parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
             logger.exception(f"ingestion failed for message {message.message_id}: {str(e)}")
-            text = TelemetryFormatter.format_ingestion_failed()
+            # Determine failure reason
+            if "File is too big" in str(e):
+                reason = "File exceeds Telegram bot API size limit (50MB)"
+            elif "album_validation_failed" in str(e):
+                reason = "Album validation failed - all files must be processable"
+            else:
+                reason = "Processing error occurred"
+            
+            text = TelemetryFormatter.format_ingestion_failed(
+                reason=reason, 
+                item_count=len(items)
+            )
             await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
