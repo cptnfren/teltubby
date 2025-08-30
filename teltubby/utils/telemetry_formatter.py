@@ -45,7 +45,11 @@ class TelemetryFormatter:
         "archive": "📦",
         "bot": "🤖",
         "minio": "☁️",
-        "stats": "📈"
+        "stats": "📈",
+        "queue": "📥",
+        "inspect": "🔎",
+        "retry": "🔁",
+        "cancel": "🛑",
     }
     
     @classmethod
@@ -188,6 +192,28 @@ class TelemetryFormatter:
             f"{cls.EMOJIS['info']} VACUUM operation completed successfully!\n"
             f"{cls.EMOJIS['storage']} Database optimized and cleaned up."
         )
+
+    @classmethod
+    def format_jobs_queued(cls, job_ids: List[str]) -> str:
+        """Format concise confirmation when jobs are queued for MTProto.
+
+        Variables:
+        - job_ids: list[str] - queued job identifiers
+        """
+        header = (
+            f"{cls.EMOJIS['success']} **Job Queued** {cls.EMOJIS['queue']}"
+            if len(job_ids) == 1
+            else f"{cls.EMOJIS['success']} **Jobs Queued** {cls.EMOJIS['queue']}"
+        )
+        lines = [header, ""]
+        for jid in job_ids:
+            lines.append(f"• `{jid}`")
+            lines.append(
+                f"  {cls.EMOJIS['inspect']} /jobs {jid}  "
+                f"{cls.EMOJIS['retry']} /retry {jid}  "
+                f"{cls.EMOJIS['cancel']} /cancel {jid}"
+            )
+        return "\n".join(lines)
     
     @classmethod
     def format_mode(cls, mode: str) -> str:

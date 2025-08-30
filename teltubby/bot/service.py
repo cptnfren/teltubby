@@ -225,9 +225,196 @@ class TeltubbyBotService:
                         
                         # Show typing indicator while processing in finalizer
                         async with self._typing_context(last_msg.chat_id):
-                            res = await process_batch(
-                                self._config, self._s3, self._dedup, self._app.bot, items
+                            # Route over-bot-limit items to MTProto via queue before Bot API
+                            to_process = []
+                            queued_jobs = []
+                            bot_limit = (
+                                self._config.bot_api_max_file_size_bytes or (50 * 1024 * 1024)
                             )
+
+                            async def _extract_file_info(m):
+                                """Extract minimal file info for routing and job creation.
+                                Returns dict with: file_id, file_unique_id, file_size, file_type,
+                                file_name, mime_type
+                                """
+                                if m.photo:
+                                    ph = max(
+                                        m.photo or [],
+                                        key=lambda p: (p.width or 0) * (p.height or 0),
+                                    )
+                                    return {
+                                        "file_id": ph.file_id,
+                                        "file_unique_id": ph.file_unique_id,
+                                        "file_size": ph.file_size,
+                                        "file_type": "photo",
+                                        "file_name": None,
+                                        "mime_type": "image/jpeg",
+                                    }
+                                if m.document:
+                                    return {
+                                        "file_id": m.document.file_id,
+                                        "file_unique_id": m.document.file_unique_id,
+                                        "file_size": m.document.file_size,
+                                        "file_type": "document",
+                                        "file_name": m.document.file_name,
+                                        "mime_type": m.document.mime_type,
+                                    }
+                                if m.video:
+                                    return {
+                                        "file_id": m.video.file_id,
+                                        "file_unique_id": m.video.file_unique_id,
+                                        "file_size": m.video.file_size,
+                                        "file_type": "video",
+                                        "file_name": m.video.file_name,
+                                        "mime_type": m.video.mime_type,
+                                    }
+                                if m.audio:
+                                    return {
+                                        "file_id": m.audio.file_id,
+                                        "file_unique_id": m.audio.file_unique_id,
+                                        "file_size": m.audio.file_size,
+                                        "file_type": "audio",
+                                        "file_name": m.audio.file_name,
+                                        "mime_type": m.audio.mime_type,
+                                    }
+                                if m.voice:
+                                    return {
+                                        "file_id": m.voice.file_id,
+                                        "file_unique_id": m.voice.file_unique_id,
+                                        "file_size": m.voice.file_size,
+                                        "file_type": "voice",
+                                        "file_name": None,
+                                        "mime_type": m.voice.mime_type,
+                                    }
+                                if m.animation:
+                                    return {
+                                        "file_id": m.animation.file_id,
+                                        "file_unique_id": m.animation.file_unique_id,
+                                        "file_size": m.animation.file_size,
+                                        "file_type": "animation",
+                                        "file_name": m.animation.file_name,
+                                        "mime_type": m.animation.mime_type,
+                                    }
+                                if m.sticker:
+                                    return {
+                                        "file_id": m.sticker.file_id,
+                                        "file_unique_id": m.sticker.file_unique_id,
+                                        "file_size": m.sticker.file_size,
+                                        "file_type": "sticker",
+                                        "file_name": None,
+                                        "mime_type": None,
+                                    }
+                                if m.video_note:
+                                    return {
+                                        "file_id": m.video_note.file_id,
+                                        "file_unique_id": m.video_note.file_unique_id,
+                                        "file_size": m.video_note.file_size,
+                                        "file_type": "video_note",
+                                        "file_name": None,
+                                        "mime_type": None,
+                                    }
+                                return None
+
+                            async def _check_file_size(finfo):
+                                """Probe Bot API file accessibility; detect too-big files."""
+                                try:
+                                    tfile = await self._app.bot.get_file(finfo["file_id"])  # type: ignore[index]
+                                    return False, getattr(tfile, "file_size", None)
+                                except Exception as e:
+                                    if "File is too big" in str(e):
+                                        return True, None
+                                    return False, finfo.get("file_size")
+
+                            import datetime as _dt
+                            import json as _json
+                            assert self._jobs and self._dedup
+
+                            for m in items:
+                                finfo = await _extract_file_info(m)
+                                if not finfo or finfo.get("file_id") is None:
+                                    to_process.append(m)
+                                    continue
+                                is_too_big, actual_size = await _check_file_size(finfo)
+                                size_hint = finfo.get("file_size") or actual_size or 0
+                                if is_too_big or (size_hint and size_hint > bot_limit):
+                                    job_id = self._jobs.new_job_id()
+                                    created_at = _dt.datetime.utcnow().strftime(
+                                        "%Y-%m-%dT%H:%M:%SZ"
+                                    )
+                                    user_id = (
+                                        getattr(getattr(m, "from_user", None), "id", None) or 0
+                                    )
+                                    payload = {
+                                        "job_id": job_id,
+                                        "user_id": user_id,
+                                        "chat_id": m.chat.id,
+                                        "message_id": m.id,
+                                        "file_info": {
+                                            "file_id": finfo["file_id"],
+                                            "file_unique_id": finfo["file_unique_id"],
+                                            "file_size": size_hint,
+                                            "file_type": finfo["file_type"],
+                                            "file_name": finfo.get("file_name"),
+                                            "mime_type": finfo.get("mime_type"),
+                                        },
+                                        "telegram_context": {
+                                            "forward_origin": (
+                                                m.forward_origin.to_dict() if m.forward_origin else None
+                                            ),
+                                            "caption": m.caption or None,
+                                            "entities": [
+                                                e.to_dict() for e in (m.entities or [])
+                                            ],
+                                            "media_group_id": m.media_group_id,
+                                        },
+                                        "job_metadata": {
+                                            "created_at": created_at,
+                                            "priority": "normal",
+                                            "retry_count": 0,
+                                            "max_retries": 3,
+                                        },
+                                    }
+                                    await self._jobs.publish_job(payload)
+                                    self._dedup.upsert_job(
+                                        job_id,
+                                        payload["user_id"],
+                                        payload["chat_id"],
+                                        payload["message_id"],
+                                        "PENDING",
+                                        4,
+                                        created_at,
+                                        _json.dumps(payload),
+                                    )
+                                    queued_jobs.append(job_id)
+                                else:
+                                    to_process.append(m)
+
+                            # Acknowledge queued jobs (emoji-rich with one-click commands); suppress further responses
+                            suppress_response = False
+                            if queued_jobs:
+                                suppress_response = True
+                                await self._app.bot.send_message(
+                                    chat_id=last_msg.chat_id,
+                                    text=TelemetryFormatter.format_jobs_queued(queued_jobs),
+                                    parse_mode=ParseMode.MARKDOWN,
+                                )
+
+                            # Process remaining items via Bot API
+                            if to_process:
+                                res = await process_batch(
+                                    self._config,
+                                    self._s3,
+                                    self._dedup,
+                                    self._app.bot,
+                                    to_process,
+                                )
+                            else:
+                                class _Dummy:
+                                    outcomes = []
+                                    base_path = ""
+                                    total_bytes_uploaded = 0
+
+                                res = _Dummy()
                         
                         logger.info(
                             "Finalizer processed batch successfully",
@@ -243,7 +430,7 @@ class TeltubbyBotService:
                         ]
                         failed_items = [o for o in res.outcomes if o.skipped_reason]
                         
-                        if not successful_items and failed_items:
+                        if not queued_jobs and not successful_items and failed_items:
                             # All items failed - send failure message instead of success
                             # Extract factual failure reasons from the outcomes
                             failure_reasons = []
@@ -297,7 +484,7 @@ class TeltubbyBotService:
                                 text=text,
                                 parse_mode=ParseMode.MARKDOWN
                             )
-                        else:
+                        elif not queued_jobs:
                             # Some or all items succeeded - send success telemetry
                             try:
                                 dedup_ordinals = [
@@ -674,11 +861,16 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
         if not rows:
             await update.effective_message.reply_text("Queue is empty.")
             return
-        lines = ["Recent jobs:"]
+        lines = [f"{TelemetryFormatter.EMOJIS['queue']} **Recent Jobs**"]
         for (job_id, user_id, chat_id, message_id, state, priority, created_at, updated_at, last_error) in rows:
-            err = f" err={last_error[:60]}..." if last_error else ""
-            lines.append(f"- {job_id} [{state}] prio={priority} msg={message_id} updated={updated_at}{err}")
-        await update.effective_message.reply_text("\n".join(lines))
+            err = f" — {last_error[:60]}..." if last_error else ""
+            lines.append(
+                f"• `{job_id}` [{state}] prio={priority}{err}\n"
+                f"  {TelemetryFormatter.EMOJIS['inspect']} /jobs {job_id}  "
+                f"{TelemetryFormatter.EMOJIS['retry']} /retry {job_id}  "
+                f"{TelemetryFormatter.EMOJIS['cancel']} /cancel {job_id}"
+            )
+        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
     async def _cmd_jobs(self, update: Update, context: CallbackContext) -> None:
         """Show details for a specific job id."""
@@ -699,13 +891,16 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
             return
         (job_id, user_id, chat_id, message_id, state, priority, created_at, updated_at, last_error, payload_json) = row
         text = (
-            f"Job {job_id}\n"
-            f"state={state} priority={priority}\n"
-            f"chat_id={chat_id} message_id={message_id}\n"
-            f"created={created_at} updated={updated_at}\n"
-            f"last_error={last_error or '-'}\n"
+            f"{TelemetryFormatter.EMOJIS['inspect']} **Job Details**\n\n"
+            f"`{job_id}`\n"
+            f"• State: {state}  • Priority: {priority}\n"
+            f"• Chat: {chat_id}  • Msg: {message_id}\n"
+            f"• Created: {created_at}\n"
+            f"• Updated: {updated_at}\n"
+            f"• Last Error: {last_error or '-'}\n\n"
+            f"{TelemetryFormatter.EMOJIS['retry']} /retry {job_id}   {TelemetryFormatter.EMOJIS['cancel']} /cancel {job_id}"
         )
-        await update.effective_message.reply_text(text)
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     async def _cmd_retry(self, update: Update, context: CallbackContext) -> None:
         """Retry a failed or cancelled job by re-publishing its payload."""
@@ -995,10 +1190,14 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
                     else:
                         to_process.append(m)
 
-                # Acknowledge queued jobs to the user
+                # Acknowledge queued jobs to the user (emoji-rich with one-click commands)
+                suppress_response = False
                 if queued_jobs:
-                    lines = ["Queued for MTProto processing:"] + [f"- {jid}" for jid in queued_jobs]
-                    await message.reply_text("\n".join(lines))
+                    suppress_response = True
+                    await message.reply_text(
+                        TelemetryFormatter.format_jobs_queued(queued_jobs),
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
 
                 # Process remaining items via Bot API
                 if to_process:
@@ -1021,7 +1220,7 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
                 ]
                 failed_items = [o for o in res.outcomes if o.skipped_reason]
                 
-                if not successful_items and failed_items:
+                if not queued_jobs and not successful_items and failed_items:
                     # All items failed - send failure message instead of success
                     # Extract factual failure reasons from the outcomes
                     failure_reasons = []
@@ -1071,7 +1270,7 @@ All commands are restricted to whitelisted users only. If you encounter issues, 
                         item_count=len(items)
                     )
                     await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-                else:
+                elif not queued_jobs:
                     # Some or all items succeeded - send success telemetry
                     dedup_ordinals = [
                         o.ordinal for o in res.outcomes if o.is_duplicate
