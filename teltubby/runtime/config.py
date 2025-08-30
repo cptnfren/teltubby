@@ -119,8 +119,10 @@ class AppConfig:
                 "ALBUM_AGGREGATION_WINDOW_SECONDS", 10
             ),
             max_file_gb=_get_int("MAX_FILE_GB", 4),
+            # Telegram Bot API hard-limit is 50 MB (decimal), not 50 MiB.
+            # Default to 50,000,000 so we route 50.2MB files to MTProto.
             bot_api_max_file_size_bytes=_get_int(
-                "BOT_API_MAX_FILE_SIZE_BYTES", 50 * 1024 * 1024
+                "BOT_API_MAX_FILE_SIZE_BYTES", 50_000_000
             ),
             sqlite_path=os.getenv("SQLITE_PATH", "/data/teltubby.db"),
             dedup_enable=_get_bool("DEDUP_ENABLE", True),
