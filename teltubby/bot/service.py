@@ -367,6 +367,9 @@ class TeltubbyBotService:
         ):
             return
         
+        # Add debug logging to see if this function is being called
+        logger.info("Help command executed", extra={"user_id": update.effective_user.id})
+        
         help_text = """🤖 **Teltubby Bot - Complete Command Reference**
 
 Welcome to Teltubby! This bot archives media files from Telegram conversations using both Bot API (≤50MB) and MTProto (≤2GB) for large files.
